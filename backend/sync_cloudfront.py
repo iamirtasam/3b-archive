@@ -105,7 +105,9 @@ def main() -> None:
         b["TargetOriginId"] = target
         b["ViewerProtocolPolicy"] = "https-only"
         b["CachePolicyId"] = cache_policy
-        b["MinTTL"] = 0
+        # Cache policies own the TTLs; legacy per-behavior TTL fields are rejected.
+        for ttl in ("MinTTL", "DefaultTTL", "MaxTTL"):
+            b.pop(ttl, None)
         b.pop("TrustedKeyGroups", None)
         if with_key_groups and key_groups:
             b["TrustedKeyGroups"] = key_groups
