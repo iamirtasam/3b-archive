@@ -77,15 +77,23 @@ def download(s3, key: str, dest: Path) -> None:
 def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
     """Returns True when the item is fully published (or was skipped)."""
     dest: Path = item["local"]
-    # The catalog keys off the source path relative to a pseudo source_dir;
-    # staged files live outside any source_dir, so key on the filename.
     key = f"staged:{item['filename']}"
     catalog_path = WORK_DIR / "catalog.json"
     catalog = cat.load(catalog_path)
 
     entry = cat.get(catalog, key)
-    hls_dir = WORK_DIR / "hls" / entry["slug"] if entry else WORK_DIR / "hls" / item["filename"].rsplit(".", 1)[0].lower().replace(" ", "-")
-    thumb_path = WORK_DIR / "thumbs" / f"{hls_dir.name}.jpg"
+    if entry:
+        hls_dir = WORK_DIR / "hls" / entry["slug"]
+        thumb_path = WORK_DIR / "thumbs" / f"{entry['slug']}.jpg"
+    else:
+        # Same slug the packaging step below will compute.
+        base_slug = "".join(
+            c if c.isalnum() or c in "-_" else "-"
+            for c in item["filename"].rsplit(".", 1)[0].lower()
+        ).strip("-") or "staged-upload"
+        slug = f"{base_slug}-{item['key'].split('/')[-1][-4:]}"
+        hls_dir = WORK_DIR / "hls" / slug
+        thumb_path = WORK_DIR / "thumbs" / f"{slug}.jpg"
 
     ready = (hls_dir / hls.PLAYLIST_NAME).exists() and thumb_path.exists()
     if not ready:
@@ -102,7 +110,13 @@ def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
         if summary["duration_seconds"] <= 0:
             raise ValueError(f"{item['filename']} has no readable video/audio")
 
-        out_dir = WORK_DIR / "hls" / cat.make_slug(dest, dest.parent, key)
+        # Stable slug from the staged filename (colons from the pseudo key
+        # would break make_slug's path handling on Windows).
+        base_slug = "".join(
+            c if c.isalnum() or c in "-_" else "-"
+            for c in item["filename"].rsplit(".", 1)[0].lower()
+        ).strip("-") or "staged-upload"
+        out_dir = WORK_DIR / "hls" / f"{base_slug}-{item['key'].split('/')[-1][-4:]}"
         hls_dir = out_dir
         playlist, reencoded = hls.prepare(
             dest, out_dir, summary=summary,
