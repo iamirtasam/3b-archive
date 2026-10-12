@@ -55,7 +55,8 @@ PARTS_PER_PAGE = 100                      # presigned URLs per response
 PRESIGN_TTL = 3600                        # part URLs live 1 hour
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024   # /tmp (10 GB) must hold the HLS output
 ALLOWED_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"}
-FFMPEG = "/var/task/bin/ffmpeg"             # vendored static build (fetch_ffmpeg.py)
+FFMPEG = str(Path(__file__).resolve().parent / "bin" / "ffmpeg")
+# vendored static build (fetch_ffmpeg.py) - extracted next to handler.py
 PBKDF2_ITERATIONS = 200_000
 
 DUMMY_HASH = "0" * 64  # compared against when the user does not exist (timing)
