@@ -29,7 +29,7 @@ DISTRIBUTION_ID = CONFIG.get("cloudfront", {}).get("distribution_id")
 BUCKET = CONFIG["s3"]["bucket"]
 REGION = CONFIG["aws"]["region"]
 
-MANAGED_CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7f02bd39ecda"
+MANAGED_CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 MANAGED_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 
 
