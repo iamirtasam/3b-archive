@@ -48,7 +48,6 @@ STREAM_TTL_SECONDS = 12 * 3600            # signed cookies live 12 hours
 PART_SIZE = 16 * 1024 * 1024              # 16 MB parts, same as the CLI pipeline
 PARTS_PER_PAGE = 100                      # presigned URLs per response
 PRESIGN_TTL = 3600                        # part URLs live 1 hour
-COMPLETE_TTL = 7 * 24 * 3600              # presigned complete URL: S3 max of 7 days
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"}
 PBKDF2_ITERATIONS = 200_000
@@ -86,7 +85,7 @@ def lambda_handler(event, context):
                 return _upload_abort(event)
             return _upload_parts(event)
         if path.startswith("/api/uploads/") and method == "DELETE":
-            return _upload_abort(event)
+            return _upload_abort(event)  # body carries key + upload_id
         return _json(404, {"error": "not found"})
     except Exception as err:  # noqa: BLE001 - convert anything to a clean 500
         print(f"ERROR {path}: {err!r}")
@@ -254,7 +253,8 @@ def _upload_start(event: dict) -> dict:
 
 
 def _upload_parts(event: dict) -> dict:
-    """Presign the next page of parts (pagination + resume after refresh)."""
+    """Presign the next page of parts, and report already-uploaded parts so
+    the browser can resume after a close/refresh."""
     username = _require_session(event)
     if username is None:
         return _json(401, {"error": "not logged in"})
@@ -264,36 +264,49 @@ def _upload_parts(event: dict) -> dict:
     key = str(body.get("key", ""))
     if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
         return _json(403, {"error": "not your upload"})
-    if not _upload_exists(key, upload_id):
+
+    s3 = boto3.client("s3")
+    try:
+        listed = s3.list_parts(Bucket=BUCKET, Key=key, UploadId=upload_id)
+    except ClientError:
         return _json(404, {"error": "upload not found - expired or aborted"})
+    received = [{
+        "part_number": p["PartNumber"],
+        "etag": p["ETag"].strip('"'),
+        "size": int(p["Size"]),
+    } for p in listed.get("Parts", [])]
 
     from_part = max(1, int(body.get("from_part", 1)))
     to_part = max(1, int(body.get("to_part", from_part + PARTS_PER_PAGE - 1)))
-    return _json(200, {"urls": _presign_parts(key, upload_id, from_part,
+    return _json(200, {"received": received,
+                       "urls": _presign_parts(key, upload_id, from_part,
                                               min(to_part, PARTS_PER_PAGE * 20))})
 
 
 def _upload_complete(event: dict) -> dict:
-    """Return a presigned URL that lets the BROWSER complete the multipart
-    upload - no upload data ever flows through Lambda."""
+    """Finish the multipart session server-side from the part list the
+    browser collected - no upload bytes ever flow through Lambda."""
     username = _require_session(event)
     if username is None:
         return _json(401, {"error": "not logged in"})
 
-    upload_id = event["rawPath"].rsplit("/", 1)[-1]
     body = _parse_body(event)
     key = str(body.get("key", ""))
+    upload_id = str(body.get("upload_id", ""))
+    parts = body.get("parts", [])
     if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
         return _json(403, {"error": "not your upload"})
-    if not _upload_exists(key, upload_id):
-        return _json(404, {"error": "upload not found - expired or aborted"})
+    if not upload_id or not parts:
+        return _json(400, {"error": "upload_id and parts are required"})
 
-    url = boto3.client("s3").generate_presigned_url(
-        "complete_multipart_upload",
-        Params={"Bucket": BUCKET, "Key": key, "UploadId": upload_id},
-        ExpiresIn=COMPLETE_TTL,
+    boto3.client("s3").complete_multipart_upload(
+        Bucket=BUCKET, Key=key, UploadId=upload_id,
+        MultipartUpload={"Parts": [
+            {"PartNumber": int(p["part_number"]), "ETag": str(p["etag"])}
+            for p in parts
+        ]},
     )
-    return _json(200, {"url": url})
+    return _json(200, {"ok": True, "key": key})
 
 
 def _upload_abort(event: dict) -> dict:
@@ -301,9 +314,9 @@ def _upload_abort(event: dict) -> dict:
     if username is None:
         return _json(401, {"error": "not logged in"})
 
-    upload_id = event["rawPath"].rsplit("/", 1)[-1]
     body = _parse_body(event)
     key = str(body.get("key", ""))
+    upload_id = str(body.get("upload_id", ""))
     if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
         return _json(403, {"error": "not your upload"})
 
@@ -311,15 +324,6 @@ def _upload_abort(event: dict) -> dict:
         Bucket=BUCKET, Key=key, UploadId=upload_id
     )
     return _json(200, {"ok": True})
-
-
-def _upload_exists(key: str, upload_id: str) -> bool:
-    s3 = boto3.client("s3")
-    try:
-        parts = s3.list_parts(Bucket=BUCKET, Key=key, UploadId=upload_id)
-        return True
-    except ClientError:
-        return False
 
 
 def _presign_parts(key: str, upload_id: str,
