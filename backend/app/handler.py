@@ -35,6 +35,8 @@ TABLE_PREFIX = os.environ.get("TABLE_PREFIX", "svg_")
 DOMAIN = os.environ["DOMAIN"]
 KEY_PAIR_ID = os.environ["KEY_PAIR_ID"]
 SSM_PARAM = os.environ["SSM_PARAM"]
+BUCKET = os.environ.get("BUCKET", "")
+UPLOAD_PREFIX = "uploads"
 
 USERS_TABLE = f"{TABLE_PREFIX}users"
 SESSIONS_TABLE = f"{TABLE_PREFIX}sessions"
@@ -43,6 +45,12 @@ VIDEOS_TABLE = f"{TABLE_PREFIX}videos"
 SESSION_COOKIE = "svg_session"
 SESSION_TTL_SECONDS = 30 * 24 * 3600      # 30 days
 STREAM_TTL_SECONDS = 12 * 3600            # signed cookies live 12 hours
+PART_SIZE = 16 * 1024 * 1024              # 16 MB parts, same as the CLI pipeline
+PARTS_PER_PAGE = 100                      # presigned URLs per response
+PRESIGN_TTL = 3600                        # part URLs live 1 hour
+COMPLETE_TTL = 7 * 24 * 3600              # presigned complete URL: S3 max of 7 days
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"}
 PBKDF2_ITERATIONS = 200_000
 
 DUMMY_HASH = "0" * 64  # compared against when the user does not exist (timing)
@@ -66,6 +74,19 @@ def lambda_handler(event, context):
             return _videos(event)
         if path == "/api/stream-auth" and method == "GET":
             return _stream_auth(event)
+        if path == "/api/uploads" and method == "GET":
+            return _uploads_list(event)
+        if path == "/api/uploads" and method == "POST":
+            return _upload_start(event)
+        if path.startswith("/api/uploads/") and method == "POST":
+            last = event["rawPath"].rsplit("/", 1)[-1]
+            if last == "complete":
+                return _upload_complete(event)
+            if last == "abort":
+                return _upload_abort(event)
+            return _upload_parts(event)
+        if path.startswith("/api/uploads/") and method == "DELETE":
+            return _upload_abort(event)
         return _json(404, {"error": "not found"})
     except Exception as err:  # noqa: BLE001 - convert anything to a clean 500
         print(f"ERROR {path}: {err!r}")
@@ -152,6 +173,167 @@ def _stream_auth(event: dict) -> dict:
         return _json(401, {"error": "not logged in"})
     return _json(200, {"ok": True, "username": username},
                  cookies=_stream_cookies())
+
+
+# ------------------------------------------------------------ upload flow
+#
+# Design: zero extra infrastructure. S3 multipart state IS the database -
+# ListMultipartUploads shows what is staged, and completed uploads sit in
+# uploads/ until the local publisher promotes them. The Lambda only does
+# what only it can do: authenticate, validate, and presign.
+
+def _sanitize_filename(name: str) -> str:
+    """Keep the basename, strip path tricks and characters S3 dislikes."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join(c if c.isalnum() or c in " ._-()" else "_" for c in base)
+    return cleaned.strip(". ") or "recording"
+
+
+def _validate_upload(filename: str, size: int) -> str | None:
+    if not BUCKET:
+        return "uploads are not configured (BUCKET env missing)"
+    if size <= 0 or size > MAX_UPLOAD_BYTES:
+        return f"file size must be 1 byte to {MAX_UPLOAD_BYTES // (1024**3)} GB"
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return f"unsupported file type {ext or '(none)'} - allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+    return None
+
+
+def _part_count(size: int) -> int:
+    return max(1, -(-size // PART_SIZE))
+
+
+def _uploads_list(event: dict) -> dict:
+    """List in-flight multipart uploads straight from S3 (no tracking table)."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+
+    s3 = boto3.client("s3")
+    uploads = []
+    paginator = s3.get_paginator("list_multipart_uploads")
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=f"{UPLOAD_PREFIX}/"):
+        for up in page.get("Uploads", []):
+            # key format: uploads/<username>/<filename>
+            owner = up["Key"].split("/")[1] if up["Key"].count("/") >= 1 else "?"
+            uploads.append({
+                "filename": up["Key"].split("/")[-1],
+                "key": up["Key"],
+                "owner": owner,
+                "initiated": up["Initiated"].isoformat(),
+                "upload_id": up["UploadId"],
+            })
+    return _json(200, {"uploads": uploads})
+
+
+def _upload_start(event: dict) -> dict:
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+
+    body = _parse_body(event)
+    filename = _sanitize_filename(str(body.get("filename", "")))
+    size = int(body.get("size_bytes", 0))
+
+    if err := _validate_upload(filename, size):
+        return _json(400, {"error": err})
+
+    s3 = boto3.client("s3")
+    key = f"{UPLOAD_PREFIX}/{username}/{filename}"
+    created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
+    upload_id = created["UploadId"]
+    return _json(200, {
+        "upload_id": upload_id,
+        "key": key,
+        "part_size": PART_SIZE,
+        "part_count": _part_count(size),
+        "urls": _presign_parts(key, upload_id, 1,
+                               min(_part_count(size), PARTS_PER_PAGE)),
+    })
+
+
+def _upload_parts(event: dict) -> dict:
+    """Presign the next page of parts (pagination + resume after refresh)."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+
+    upload_id = event["rawPath"].rsplit("/", 1)[-1]
+    body = _parse_body(event)
+    key = str(body.get("key", ""))
+    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+        return _json(403, {"error": "not your upload"})
+    if not _upload_exists(key, upload_id):
+        return _json(404, {"error": "upload not found - expired or aborted"})
+
+    from_part = max(1, int(body.get("from_part", 1)))
+    to_part = max(1, int(body.get("to_part", from_part + PARTS_PER_PAGE - 1)))
+    return _json(200, {"urls": _presign_parts(key, upload_id, from_part,
+                                              min(to_part, PARTS_PER_PAGE * 20))})
+
+
+def _upload_complete(event: dict) -> dict:
+    """Return a presigned URL that lets the BROWSER complete the multipart
+    upload - no upload data ever flows through Lambda."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+
+    upload_id = event["rawPath"].rsplit("/", 1)[-1]
+    body = _parse_body(event)
+    key = str(body.get("key", ""))
+    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+        return _json(403, {"error": "not your upload"})
+    if not _upload_exists(key, upload_id):
+        return _json(404, {"error": "upload not found - expired or aborted"})
+
+    url = boto3.client("s3").generate_presigned_url(
+        "complete_multipart_upload",
+        Params={"Bucket": BUCKET, "Key": key, "UploadId": upload_id},
+        ExpiresIn=COMPLETE_TTL,
+    )
+    return _json(200, {"url": url})
+
+
+def _upload_abort(event: dict) -> dict:
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+
+    upload_id = event["rawPath"].rsplit("/", 1)[-1]
+    body = _parse_body(event)
+    key = str(body.get("key", ""))
+    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+        return _json(403, {"error": "not your upload"})
+
+    boto3.client("s3").abort_multipart_upload(
+        Bucket=BUCKET, Key=key, UploadId=upload_id
+    )
+    return _json(200, {"ok": True})
+
+
+def _upload_exists(key: str, upload_id: str) -> bool:
+    s3 = boto3.client("s3")
+    try:
+        parts = s3.list_parts(Bucket=BUCKET, Key=key, UploadId=upload_id)
+        return True
+    except ClientError:
+        return False
+
+
+def _presign_parts(key: str, upload_id: str,
+                   from_part: int, to_part: int) -> list[dict]:
+    s3 = boto3.client("s3")
+    return [{
+        "part_number": n,
+        "url": s3.generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": BUCKET, "Key": key,
+                    "UploadId": upload_id, "PartNumber": n},
+            ExpiresIn=PRESIGN_TTL,
+        ),
+    } for n in range(from_part, to_part + 1)]
 
 
 # ------------------------------------------------------------------- helpers
