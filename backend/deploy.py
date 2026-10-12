@@ -162,8 +162,9 @@ def ensure_role(session: boto3.session.Session) -> str:
                 {
                     "Effect": "Allow",
                     "Action": [
-                        "dynamodb:GetItem", "PutItem", "DeleteItem",
-                        "Query", "Scan", "UpdateItem",
+                        "dynamodb:GetItem", "dynamodb:PutItem",
+                        "dynamodb:DeleteItem", "dynamodb:Query",
+                        "dynamodb:Scan", "dynamodb:UpdateItem",
                     ],
                     "Resource": table_arns,
                 },
