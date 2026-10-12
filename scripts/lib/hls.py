@@ -78,10 +78,13 @@ def remux_to_hls(
         "-hls_playlist_type", "vod",
         "-hls_flags", "independent_segments",
         "-hls_segment_type", "fmp4",
-        "-hls_segment_filename", str(out_dir / "seg_%05d.m4s"),
-        str(out_dir / PLAYLIST_NAME),
+        "-hls_segment_filename", "seg_%05d.m4s",
+        PLAYLIST_NAME,
     ]
-    _run(cmd, source)
+    # Run inside out_dir: ffmpeg resolves the fMP4 init.mp4 relative to the
+    # process CWD, so bare filenames keep playlist + segments + init together.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _run(cmd, source, cwd=out_dir)
     _require_playlist(out_dir, source)
     return out_dir / PLAYLIST_NAME
 
@@ -103,17 +106,18 @@ def transcode_to_hls(
         "-hls_playlist_type", "vod",
         "-hls_flags", "independent_segments",
         "-hls_segment_type", "fmp4",
-        "-hls_segment_filename", str(out_dir / "seg_%05d.m4s"),
-        str(out_dir / PLAYLIST_NAME),
+        "-hls_segment_filename", "seg_%05d.m4s",
+        PLAYLIST_NAME,
     ]
-    _run(cmd, source)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _run(cmd, source, cwd=out_dir)
     _require_playlist(out_dir, source)
     return out_dir / PLAYLIST_NAME
 
 
-def _run(cmd: list[str], source: Path) -> None:
+def _run(cmd: list[str], source: Path, cwd: Path | None = None) -> None:
     log.debug("Running: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     if result.returncode != 0:
         raise RemuxError(f"ffmpeg failed for {source.name}: {result.stderr.strip()[:500]}")
 
