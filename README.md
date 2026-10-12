@@ -29,22 +29,22 @@ The videos are **remuxed, not re-encoded**. ffmpeg takes the existing H.264 stre
 ## What's in this repo
 
 ```
-├── scripts/            Python pipeline: remux → thumbnails → upload to S3
-│   ├── prepare.py      Package recordings into HLS (resumable, lossless)
+├── scripts/            Python pipeline: remux → thumbnails → upload to S3│   ├── prepare.py      Package recordings into HLS (resumable, lossless)
 │   ├── upload.py       Upload prepared videos to S3 (resumable, multipart)
 │   ├── pipeline.py     Both of the above in one command
-│   ├── publish.py      Promote browser-staged uploads into playable videos
+│   ├── publish.py      Manual fallback publisher (Lambda auto-packages first)
 │   └── lib/            Shared helpers (ffmpeg, S3, catalog, thumbnails)
 ├── site/               The website — served by CloudFront at the same domain
 │   ├── index.html      Login, archive, and player views (single page app)
 │   ├── app.js          Routing, HLS playback, resume, cookie-based auth
 │   └── styles.css      Brutalist editorial design system
 ├── backend/            Lambda API + deployment tooling
-│   ├── app/handler.py  Login, catalog, stream auth, upload presigning
+│   ├── app/handler.py  Login, catalog, stream auth, upload presigning, auto-packaging
 │   ├── deploy.py       Idempotent backend provisioning (DynamoDB, SSM, Lambda, HTTP API)
 │   ├── sync_cloudfront.py  Wire site + API + videos into one distribution
 │   ├── deploy_site.py  Upload the website and invalidate the CDN cache
 │   ├── ensure_cors.py  Bucket CORS for direct browser uploads
+│   ├── fetch_ffmpeg.py Downloads the static ffmpeg vendored into the Lambda
 │   ├── create_user.py  Create a viewer account
 │   ├── seed_catalog.py Sync the local catalog into DynamoDB
 │   └── e2e_test.py     End-to-end verification of the whole stack
@@ -92,7 +92,7 @@ One CloudFront distribution serves everything from a single domain — `https://
 | `/` | Site files in S3 (`index.html`, `app.js`, …) | Public — it's just the app shell, no data |
 | `/api/*` | API Gateway → Lambda (login, catalog, stream auth, upload presigning) | Public endpoints, authenticated logic |
 | `/videos/*` | The HLS videos in S3 | Signed cookies required — 403 for everyone else |
-| `uploads/*` (in S3) | Staged originals waiting for packaging | Presigned part URLs only |
+| `uploads/*` (in S3) | Staged originals waiting for (auto-)packaging | Presigned part URLs only |
 
 Because the site, the API, and the videos share one domain, logging in sets CloudFront signed cookies once and the browser attaches them to every playlist, segment, and API call automatically. No CORS, no per-URL signatures, no juggling tokens. Expired playback cookies renew themselves mid-stream via `/api/stream-auth`.
 
@@ -103,15 +103,14 @@ Click **UPLOAD** in the site's nav bar (or drag recordings onto the upload page)
 1. The browser picks up your files and asks the Lambda for presigned part URLs
 2. It streams 16 MB chunks **directly to S3** — with a live progress bar, speed, and ETA; nothing flows through the API
 3. Close the tab mid-upload? Reopen the page and re-pick the file — it resumes from wherever S3 already has bytes
-4. Finished files sit in `uploads/` as *staged* originals
+4. The moment a file finishes, a background Lambda job packages it **automatically** — the video appears on the archive a couple of minutes later, and the upload card flips to `LIVE ✓`
 
-Then, from your PC, close the loop (this is the one step a browser can't do, because packaging needs ffmpeg):
+Nothing else to run. The packaging job streams the original from S3 through a vendored static ffmpeg (presigned-URL input, so recordings with a trailing moov atom seek fine), remuxes to fMP4 HLS losslessly with `-c copy`, cuts a poster frame, writes the catalog entry, and consumes the staged original — all inside Lambda's free tier. The browser upload cap is 8 GB per file so every job fits Lambda's 15-minute ceiling.
 
-```powershell
-python scripts\publish.py
-```
+Two edge cases fall back to the manual path (`scripts/publish.py`, unchanged and slug-compatible):
 
-That downloads each staged original, remuxes it to HLS losslessly, uploads the stream package, removes the staged copy, and refreshes the catalog — the videos appear on the site immediately. `--dry-run` previews; `--keep-source` retains the originals.
+- files **over 8 GB** — upload those from `D:\Recordings` with `scripts/pipeline.py` as before
+- sources whose codecs can't be stream-copied (the job publishes only true H.264/AAC remuxes; anything else stays staged)
 
 ### Adding new users
 
@@ -153,7 +152,7 @@ The S3 bucket blocks all public access. The only way in is through CloudFront, a
 - [x] **Phase 2** — first videos migrated (Valorant batch, 3.7 GB, 327 segments)
 - [x] **Phase 3** — backend: login, folder catalog, signed cookie issuing (Lambda + API Gateway + DynamoDB)
 - [x] **Phase 4** — website: brutalist login → folder browse → gallery → HLS player with resume
-- [x] **Phase 5** — web uploader: drag-and-drop or file picker, direct-to-S3 multipart with progress, speed, ETA, and refresh-proof resume; `publish.py` closes the loop from your PC
+- [x] **Phase 5** — web uploader: drag-and-drop or file picker, direct-to-S3 multipart with progress, speed, ETA, and refresh-proof resume; auto-packaging in Lambda publishes uploads by itself (`publish.py` stays as the manual fallback)
 - [ ] **Phase 6** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
 - [ ] **Phase 7** — region migration script (ap-south-1 → eu-central-1) and niceties
 

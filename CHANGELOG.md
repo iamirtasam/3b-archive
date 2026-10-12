@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here. Dates are when the phase landed.
 
+## 0.6.0 — Phase 5.5: auto-packaging (2026-10-12)
+
+### Added
+- **Zero-touch publishing**: a background Lambda job packages every finished upload by itself — the video appears on the archive a couple of minutes after the upload completes, no PC step
+- The job streams the staged original from S3 through a vendored static ffmpeg (`backend/fetch_ffmpeg.py`, gitignored, fetched on demand) and remuxes to fMP4 HLS with `-c copy` — same lossless recipe as the local pipeline, still free-tier
+- ffmpeg input is a presigned S3 URL: its HTTP range requests handle recordings whose moov atom sits at the end (a stdin pipe cannot seek and fails exactly there); the source never touches `/tmp`, so size is bounded by the 15-minute ceiling, not scratch space
+- Poster frame cut from `init.mp4` + first segment (a valid seekable fMP4 file) — no second read of the source
+- H.264 stream-copy gate: non-copyable sources stay staged for the manual fallback
+- Upload cards now poll the catalog after finishing and flip to `LIVE ✓ — ON THE ARCHIVE`, refreshing the home page in place
+- Lambda sized for the job: 15 min timeout, 1024 MB, 10 GB ephemeral storage; code deployed via S3 (vendored ffmpeg pushes the zip past the 50 MB direct-upload limit); IAM grants for `GetObject`/`DeleteObject` on uploads, `PutObject` on videos, and self-invocation
+- Complete route returns the deterministic slug (`stem + md5(key)[:8]`, shared with `publish.py`)
+
+### Changed
+- `scripts/publish.py` is now the manual fallback (files > 8 GB, non-H.264 codecs) with slugs identical to the Lambda's, so the two paths never collide
+- Browser upload cap lowered 25 GB → 8 GB (auto-packaging must finish inside Lambda's limit)
+- 0-duration playlists are rejected instead of published
+
+### Fixed
+- ffmpeg path inside the Lambda zip resolved from `__file__` (`/var/task/app/bin/ffmpeg`)
+- The pipe-fed two-output ffmpeg invocation that silently produced one empty segment — replaced by the presigned-URL input plus a separate poster pass (both verified locally before deploying)
+
 ## 0.5.0 — Phase 5 (2026-10-12)
 
 ### Added
