@@ -101,6 +101,7 @@ def main() -> None:
             k: v for k, v in default.items()
             if k not in ("TargetOriginId", "PathPattern")
         }))
+        b["PathPattern"] = path
         b["TargetOriginId"] = target
         b["ViewerProtocolPolicy"] = "https-only"
         b["CachePolicyId"] = cache_policy
