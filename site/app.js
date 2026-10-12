@@ -194,13 +194,17 @@
   /* ---------------- hash router ----------------------------------------- */
 
   function route() {
+    if (!routedOnce && state.videos.length === 0) return; // catalog not loaded yet
+    routedOnce = true;
     const hash = location.hash || "#/";
     const find = (slug) => state.videos.find((v) => v.slug === slug);
 
     if (hash.startsWith("#/watch/")) {
       const v = find(hash.slice("#/watch/".length));
       if (v) { playVideo(v); show("player"); return; }
-      location.hash = "#/";
+      // Unknown slug on a live session: home. On first load, keep the hash
+      // so enterApp can retry after the catalog arrives.
+      if (routedOnce && state.videos.length) { location.hash = "#/"; }
       return;
     }
     if (hash.startsWith("#/folder/")) {
@@ -445,6 +449,10 @@
     route();
   }
 
+  // Deep links like #/watch/<slug> must survive a fresh load: the router
+  // needs the catalog, so park the hash and route once it arrives.
+  let routedOnce = false;
+
   $("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = $("login-error");
@@ -516,7 +524,7 @@
   (async () => {
     const { status, data } = await api("/api/videos");
     if (status === 200) {
-      enterApp(data); // cookie session still valid
+      enterApp(data); // cookie session still valid; routes the parked hash
     } else {
       show("login");
     }
