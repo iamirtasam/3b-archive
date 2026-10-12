@@ -53,6 +53,8 @@ def main() -> None:
     s3_origin_id = config["DefaultCacheBehavior"]["TargetOriginId"]
     api_origin_id = "api-gateway-origin"
 
+    origins = config["Origins"].get("Items", [])
+
     # Normalize fields the UpdateDistribution API requires on every origin
     # (creates tolerate defaults; updates demand them explicitly).
     for origin in origins:
@@ -67,7 +69,6 @@ def main() -> None:
             origin["CustomOriginConfig"].setdefault("OriginReadTimeout", 30)
             origin["CustomOriginConfig"].setdefault("OriginKeepaliveTimeout", 5)
 
-    origins = config["Origins"].get("Items", [])
     if not any(o["Id"] == api_origin_id for o in origins):
         origins.append({
             "Id": api_origin_id,
