@@ -207,11 +207,31 @@
       renderFolderNav(); renderGrid(); show("app");
       return;
     }
+    if (hash.startsWith("#/upload")) {
+      refreshStaged();
+      show("upload");
+      return;
+    }
     state.folder = null;
     renderFolderNav(); renderFolders(); renderGrid(); show("app");
   }
 
   window.addEventListener("hashchange", route);
+  // Reload any interrupted uploads on page load (resume after close/refresh).
+  window.addEventListener("DOMContentLoaded", () => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("upload:")) {
+        const [, name, size] = key.split(":");
+        const sizeNum = Number(size);
+        if (name && sizeNum > 0) {
+          // Files cannot be re-read after a refresh; surface them as resumable
+          // rows the user re-picks. Clear stale entries older than 7 days.
+          const meta = JSON.parse(localStorage.getItem(key) || "null");
+          if (!meta || !meta.uploadId) localStorage.removeItem(key);
+        }
+      }
+    }
+  });
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-nav]") && e.target.closest("[data-nav]").dataset.hash) {
       e.preventDefault();
@@ -219,7 +239,200 @@
     }
   });
 
-  /* ---------------- auth flow -------------------------------------------- */
+  /* ---------------- uploads --------------------------------------------- */
+
+  const uploadMeta = (file) => `upload:${file.name}:${file.size}`;
+
+  function fmtBytes(n) {
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+    if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`;
+    return `${(n / 1024).toFixed(0)} KB`;
+  }
+
+  function uploadCard(file) {
+    const old = document.getElementById(`up-${CSS.escape(file.name)}-${file.size}`);
+    if (old) old.remove();
+    const card = document.createElement("div");
+    card.className = "upload-card";
+    card.id = `up-${CSS.escape(file.name)}-${file.size}`;
+    card.innerHTML = `
+      <div class="upload-card-head">
+        <span class="video-title">${file.name}</span>
+        <span class="mono-label">${fmtBytes(file.size)}</span>
+      </div>
+      <div class="upload-bar"><div></div></div>
+      <div class="upload-card-foot">
+        <span class="mono-label upload-status">STARTING…</span>
+        <span class="mono-label upload-speed"></span>
+      </div>`;
+    $("upload-queue").prepend(card);
+    return card;
+  }
+
+  function setProgress(file, pct, status, speed) {
+    const card = document.getElementById(`up-${CSS.escape(file.name)}-${file.size}`);
+    if (!card) return;
+    card.querySelector(".upload-bar > div").style.width = `${Math.max(2, pct)}%`;
+    card.querySelector(".upload-status").textContent = status;
+    card.querySelector(".upload-speed").textContent = speed || "";
+  }
+
+  const saveMeta = (file, meta) =>
+    localStorage.setItem(uploadMeta(file), JSON.stringify(meta));
+  const loadMeta = (file) => {
+    try { return JSON.parse(localStorage.getItem(uploadMeta(file)) || "null"); }
+    catch { return null; }
+  };
+  const clearMeta = (file) => localStorage.removeItem(uploadMeta(file));
+
+  // Presigned part URLs come in pages of 100; cache the current page.
+  const presignCache = new Map();
+  async function presignUrl(meta, partNumber) {
+    const pageIdx = Math.floor((partNumber - 1) / 100);
+    const cacheKey = `${meta.uploadId}:${pageIdx}`;
+    let page = presignCache.get(cacheKey);
+    if (!page) {
+      const r = await api(`/api/uploads/${meta.uploadId}`, {
+        body: {
+          key: meta.key,
+          from_part: pageIdx * 100 + 1,
+          to_part: pageIdx * 100 + 100,
+        },
+      });
+      if (r.status !== 200) throw new Error(r.data.error || "presign failed");
+      page = new Map(r.data.urls.map((u) => [u.part_number, u.url]));
+      presignCache.set(cacheKey, page);
+    }
+    return page.get(partNumber);
+  }
+
+  const PART_CONCURRENCY = 3;
+  const PART_RETRIES = 3;
+
+  async function uploadFile(file) {
+    uploadCard(file);
+    const startedAt = Date.now();
+
+    // Resume: reuse the multipart session saved before a close/refresh.
+    let meta = loadMeta(file);
+    if (!meta) {
+      const r = await api("/api/uploads", {
+        body: { filename: file.name, size_bytes: file.size },
+      });
+      if (r.status !== 200) {
+        setProgress(file, 0, (r.data.error || "REJECTED").toUpperCase(), "");
+        return;
+      }
+      meta = { uploadId: r.data.upload_id, key: r.data.key,
+               partSize: r.data.part_size, partCount: r.data.part_count };
+      saveMeta(file, meta);
+    }
+
+    const completed = new Map(); // partNumber -> etag
+    let uploadedBytes = 0;
+    let nextPart = 1;
+    let lastTick = Date.now(), lastBytes = 0;
+
+    // Which parts are already on S3? (resume after close/refresh)
+    try {
+      const probe = await api(`/api/uploads/${meta.uploadId}`, {
+        body: { key: meta.key, from_part: 1, to_part: 0 },
+      });
+      if (probe.status === 200) {
+        for (const p of probe.data.received || []) {
+          completed.set(p.part_number, p.etag);
+          uploadedBytes += p.size;
+        }
+        nextPart = Math.max(...completed.keys(), 0) + 1;
+      }
+    } catch { /* fresh upload */ }
+
+    const tick = () => {
+      const now = Date.now();
+      if (now - lastTick < 700) return;
+      const speed = ((uploadedBytes - lastBytes) * 1000) / (now - lastTick);
+      const pct = (uploadedBytes / file.size) * 100;
+      const eta = (file.size - uploadedBytes) / Math.max(speed, 1);
+      setProgress(file, pct,
+        `${completed.size}/${meta.partCount} PARTS`,
+        `${fmtBytes(speed)}/S — ${eta > 90 ? `${Math.round(eta / 60)} MIN LEFT` : `${Math.round(eta)} S LEFT`}`);
+      lastTick = now; lastBytes = uploadedBytes;
+    };
+
+    const total = meta.partCount;
+    const worker = async () => {
+      while (nextPart <= total) {
+        const partNumber = nextPart++;
+        if (completed.has(partNumber)) continue;
+        const start = (partNumber - 1) * meta.partSize;
+        const blob = file.slice(start, Math.min(start + meta.partSize, file.size));
+        for (let attempt = 1; attempt <= PART_RETRIES; attempt++) {
+          try {
+            const url = await presignUrl(meta, partNumber);
+            const res = await fetch(url, { method: "PUT", body: blob });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            completed.set(partNumber, res.headers.get("ETag").replaceAll('"', ""));
+            uploadedBytes += blob.size;
+            tick();
+            break;
+          } catch (err) {
+            if (attempt === PART_RETRIES) throw err;
+            await new Promise((r) => setTimeout(r, 1200 * attempt));
+          }
+        }
+      }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: PART_CONCURRENCY }, worker));
+    } catch (err) {
+      setProgress(file, (uploadedBytes / file.size) * 100,
+        "PAUSED — REOPEN TO RESUME", err.message);
+      return; // meta stays in localStorage: next visit resumes
+    }
+
+    const done = await api("/api/uploads/complete", {
+      body: { key: meta.key, upload_id: meta.uploadId,
+              parts: [...completed].map(([part_number, etag]) =>
+                     ({ part_number, etag })) },
+    });
+    if (done.status !== 200) {
+      setProgress(file, 100, "FINISH FAILED — REOPEN TO RESUME", done.data.error || "");
+      return;
+    }
+    const secs = (Date.now() - startedAt) / 1000;
+    setProgress(file, 100, "STAGED ✓",
+      `${fmtBytes(file.size / Math.max(secs, 1))}/S AVG`);
+    clearMeta(file);
+    refreshStaged();
+  }
+
+  /* ---------------- staged list ----------------------------------------- */
+
+  async function refreshStaged() {
+    const r = await api("/api/uploads");
+    const list = $("staged-list");
+    list.textContent = "";
+    if (r.status !== 200) return;
+    const uploads = r.data.uploads || [];
+    for (const up of uploads) {
+      const row = document.createElement("div");
+      row.className = "staged-row";
+      row.innerHTML = `
+        <span class="video-title">${up.filename}</span>
+        <span class="mono-label">${up.owner === state.username ? "YOURS — AWAITING PACKAGING" : up.owner.toUpperCase()}</span>
+        <button class="btn btn-ghost btn-sm staged-abort">DISCARD</button>`;
+      row.querySelector(".staged-abort").onclick = async () => {
+        await api("/api/uploads/abort", {
+          body: { key: up.key, upload_id: up.upload_id },
+        });
+        refreshStaged();
+      };
+      list.appendChild(row);
+    }
+    $("staged-section").hidden = uploads.length === 0;
+  }
+
 
   function enterApp(data) {
     state.videos = data.videos || [];
@@ -272,6 +485,15 @@
     location.hash = state.folder ? `#/folder/${encodeURIComponent(state.folder)}` : "#/";
     if (v) { const video = $("player-video"); video.pause(); }
   });
+
+  $("nav-upload-btn").addEventListener("click", () => { location.hash = "#/upload"; });
+  $("upload-back-btn").addEventListener("click", () => { location.hash = "#/"; });
+  $("pick-btn").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", (e) => {
+    for (const file of e.target.files) uploadFile(file);
+    e.target.value = ""; // allow re-picking the same file
+  });
+  $("refresh-staged-btn").addEventListener("click", refreshStaged);
 
   $("all-folders-btn").addEventListener("click", () => { location.hash = "#/"; });
 

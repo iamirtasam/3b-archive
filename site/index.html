@@ -77,6 +77,7 @@
     <div class="nav-pill">
       <a class="nav-brand" href="#/" data-nav>DALAL<em>*</em></a>
       <nav class="nav-links" id="folder-nav"><!-- folder links injected --></nav>
+      <button class="btn btn-solid btn-sm" id="nav-upload-btn">UPLOAD</button>
       <span class="nav-user mono-label" id="nav-user"></span>
       <button class="btn btn-ghost btn-sm" id="logout-btn">LOG OUT</button>
     </div>
@@ -143,6 +144,43 @@
       <span class="mono-label" id="player-resolution"></span>
       <span class="mono-label player-hint">HLS — STREAMED IN 6-SECOND CHUNKS</span>
     </div>
+  </main>
+</section>
+
+<!-- ============================== UPLOAD VIEW ============================= -->
+<section id="upload-view" class="view" hidden>
+  <header class="topbar">
+    <div class="nav-pill">
+      <a class="nav-brand" href="#/" data-nav>DALAL<em>*</em></a>
+      <button class="text-link" id="upload-back-btn">← BACK TO THE ARCHIVE</button>
+    </div>
+  </header>
+
+  <main class="upload-main">
+    <h1 class="display-lg">
+      <span class="reveal-line"><span>FEED</span></span>
+      <span class="reveal-line"><span>THE ARCHIVE<span class="accent-dot">.</span></span></span>
+    </h1>
+    <p class="upload-sub">Recordings stream straight to private storage in 16 MB
+      chunks. Close the tab, come back, resume — nothing is lost. A later
+      packaging step turns them into playable streams.</p>
+
+    <div class="upload-actions">
+      <button class="btn btn-solid" id="pick-btn">CHOOSE FILES</button>
+      <input type="file" id="file-input" multiple hidden
+             accept=".mp4,.m4v,.mov,.mkv,.avi,.webm">
+      <span class="mono-label" id="upload-hint">MP4 · MOV · MKV · AVI · WEBM — UP TO 25 GB EACH</span>
+    </div>
+
+    <div class="upload-queue" id="upload-queue"><!-- upload cards injected --></div>
+
+    <section id="staged-section">
+      <div class="section-head">
+        <h2 class="heading-secondary">STAGED ON S3</h2>
+        <button class="text-link" id="refresh-staged-btn">REFRESH</button>
+      </div>
+      <div class="staged-list" id="staged-list"><!-- injected --></div>
+    </section>
   </main>
 </section>
 
