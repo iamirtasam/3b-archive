@@ -33,40 +33,21 @@ MANAGED_CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 MANAGED_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 # Forwards every viewer header (cookies, content-type) to the origin except
 # Host, which must stay on the origin domain for API Gateway to accept it.
+# Free-plan distributions cannot use custom policies, so the signed CloudFront-*
+# cookies on /videos/* are forwarded (and edge-validated) via this managed
+# origin request policy instead of a cookie-whitelisting cache policy.
 MANAGED_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
 
 def ensure_video_cache_policy(cf) -> str:
-    """Cache policy for /videos/*: whitelists the three CloudFront-* signed
-    cookies so the edge can validate them (they are consumed, never keyed),
-    while keeping segment caching with long TTLs. Idempotent by name."""
-    name = "svg-signed-videos"
-    existing = cf.list_cache_policies().get("CachePolicyList", {}).get("Items", [])
-    for item in existing:
-        if item and item["CachePolicy"]["CachePolicyConfig"]["Name"] == name:
-            return item["CachePolicy"]["Id"]
-    resp = cf.create_cache_policy(CachePolicyConfig={
-        "Name": name,
-        "Comment": "Signed-cookie validation for private video playback",
-        "DefaultTTL": 86400,
-        "MaxTTL": 31536000,
-        "MinTTL": 1,
-        "ParametersInCacheKeyAndForwardedToOrigin": {
-            "CookiesConfig": {
-                "CookieBehavior": "whitelist",
-                "Cookies": {"Quantity": 3, "Items": [
-                    "CloudFront-Key-Pair-Id", "CloudFront-Policy",
-                    "CloudFront-Signature",
-                ]},
-            },
-            "HeadersConfig": {"HeaderBehavior": "none"},
-            "QueryStringsConfig": {"QueryStringBehavior": "none"},
-            "EnableAcceptEncodingBrotli": True,
-            "EnableAcceptEncodingGzip": True,
-        },
-    })
-    print(f"Cache policy created: {name}")
-    return resp["CachePolicy"]["Id"]
+    """Cache policy for /videos/*.
+
+    Signed CloudFront-* cookies must reach the edge validator for
+    /videos/*. Custom cache policies are a paid-plan feature, so we use
+    managed CachingOptimized + Managed-AllViewerExceptHostHeader (cookies
+    forwarded, not part of the cache key).
+    """
+    return MANAGED_CACHING_OPTIMIZED
 
 
 def main() -> None:
@@ -171,7 +152,8 @@ def main() -> None:
                            allowed=["GET", "HEAD", "OPTIONS", "PUT", "PATCH",
                                     "POST", "DELETE"],
                            origin_request_policy=MANAGED_ALL_VIEWER_EXCEPT_HOST),
-        "/videos/*": behavior("/videos/*", s3_origin_id, video_cache_policy, True),
+        "/videos/*": behavior("/videos/*", s3_origin_id, video_cache_policy, True,
+                              origin_request_policy=MANAGED_ALL_VIEWER_EXCEPT_HOST),
     }
 
     existing = config["CacheBehaviors"].get("Items", [])
