@@ -71,7 +71,14 @@ aws s3 cp s3://my-video-archive/videos/ ./probe/ --no-sign-request 2>&1 | head -
 curl -i "https://d1234abcd.cloudfront.net/videos/anything/index.m3u8" | head -3
 ```
 
-Both should refuse access — that is exactly what we want. Only URLs signed with your private key will play. Phase 3 (the backend) will generate those signatures automatically after login; for a quick manual smoke test you can sign a URL with a tiny Python snippet (ask me — I'll add a `scripts/sign-url.py` utility when we get there).
+Both should refuse access — that is exactly what we want. Only URLs signed with your private key will play. To watch a video manually, use the signer:
+
+```powershell
+python scripts/sign-url.py list          # slugs from the catalog
+python scripts/sign-url.py <slug>        # prints a 4-hour signed playback URL
+```
+
+(Requires the `cloudfront` block in `config.json`: distribution domain, key pair ID, and the private key path. Phase 3's backend will generate these signatures automatically after login.)
 
 ## 5. Set a billing alarm (2 minutes, do not skip)
 
