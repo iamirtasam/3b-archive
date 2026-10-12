@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default="config.json", help="Path to config.json")
     parser.add_argument("--source", help="Folder containing recordings (overrides config)")
     parser.add_argument("--limit", type=int, help="Process at most N files this run")
+    parser.add_argument("--max-size-mb", type=int, help="Only process files up to this size (for test runs)")
     parser.add_argument("--force", action="store_true", help="Re-prepare even if already done")
     parser.add_argument("--dry-run", action="store_true", help="List work without doing it")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
@@ -39,6 +40,8 @@ def main(argv: list[str] | None = None) -> None:
         passthrough += ["--source", args.source]
     if args.limit:
         passthrough += ["--limit", str(args.limit)]
+    if args.max_size_mb:
+        passthrough += ["--max-size-mb", str(args.max_size_mb)]
     if args.force:
         passthrough.append("--force")
     if args.dry_run:
