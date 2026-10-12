@@ -122,9 +122,12 @@ def _videos(event: dict) -> dict:
         return _json(401, {"error": "not logged in"})
 
     items = []
-    paginator = _dynamo().get_paginator("scan")
-    for page in paginator.paginate(TableName=VIDEOS_TABLE):
-        items.extend(page.get("Items", []))
+    table = _table(VIDEOS_TABLE)
+    response = table.scan()
+    items.extend(response.get("Items", []))
+    while "LastEvaluatedKey" in response:  # paginate manually past 1 MB pages
+        response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+        items.extend(response.get("Items", []))
 
     videos = []
     for item in items:
