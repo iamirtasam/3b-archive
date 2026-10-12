@@ -176,13 +176,14 @@ def ensure_role(session: boto3.session.Session) -> str:
                 },
                 {
                     # Presigning itself needs no permission; these allow the
-                    # Lambda to create/list/abort multipart uploads so the
-                    # browser can stream files directly to S3.
+                    # Lambda to create, inspect, and abort multipart uploads
+                    # so the browser can stream files directly to S3.
                     "Effect": "Allow",
                     "Action": [
+                        "s3:PutObject",
                         "s3:ListBucketMultipartUploads",
-                        "s3:AbortMultipartUpload",
                         "s3:ListMultipartUploadParts",
+                        "s3:AbortMultipartUpload",
                     ],
                     "Resource": [
                         f"arn:aws:s3:::{BUCKET}",
