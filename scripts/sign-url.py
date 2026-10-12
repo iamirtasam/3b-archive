@@ -98,6 +98,12 @@ def main(argv: list[str] | None = None) -> None:
             if line and not line.startswith("#") else line
             for line in lines
         ]
+        # fMP4 playlists reference init.mp4 via EXT-X-MAP; sign it too.
+        rewritten = [
+            f'#EXT-X-MAP:URI="https://{domain}/{prefix}/{args.slug}/init.mp4{query}"'
+            if line.startswith("#EXT-X-MAP:") else line
+            for line in rewritten
+        ]
         out.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
         print(f"Saved    : {out} - open this file in VLC instead")
 
