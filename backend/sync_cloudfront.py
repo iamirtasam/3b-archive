@@ -116,9 +116,13 @@ def main() -> None:
         if with_key_groups and key_groups:
             b["TrustedKeyGroups"] = key_groups
         if allowed:
-            b["AllowedMethods"] = {"Quantity": len(allowed), "Items": allowed}
             # CloudFront only accepts fixed method combinations; POST requires
-            # the full set. (CachedMethods belongs to the cache policy here.)
+            # the full set. CachedMethods nests inside AllowedMethods.
+            b["AllowedMethods"] = {
+                "Quantity": len(allowed),
+                "Items": allowed,
+                "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
+            }
         return b
 
     wanted = {
