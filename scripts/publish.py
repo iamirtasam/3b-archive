@@ -133,6 +133,8 @@ def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
             "slug": out_dir.name,
             "title": dest.stem,
             "source_path": item["key"],
+            "status": "ready",
+            "uploaded": True,
             "duration_seconds": int(summary["duration_seconds"]),
             "width": summary.get("width"),
             "height": summary.get("height"),
