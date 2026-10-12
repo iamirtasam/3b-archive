@@ -1,0 +1,27 @@
+{
+  "aws": {
+    "region": "ap-south-1",
+    "profile": "default"
+  },
+  "s3": {
+    "bucket": "my-video-archive",
+    "prefix": "videos"
+  },
+  "paths": {
+    "source_dir": "H:/Recordings",
+    "work_dir": "./.data"
+  },
+  "ffmpeg": {
+    "binary": "ffmpeg",
+    "ffprobe": "ffprobe",
+    "hls_segment_seconds": 6,
+    "thumbnail_seek_seconds": 5,
+    "thumbnail_width": 640
+  },
+  "upload": {
+    "multipart_threshold_mb": 64,
+    "multipart_chunksize_mb": 16,
+    "max_concurrency": 8
+  },
+  "video_extensions": [".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"]
+}
