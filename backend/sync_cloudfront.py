@@ -36,6 +36,39 @@ MANAGED_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 MANAGED_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
 
+def ensure_video_cache_policy(cf) -> str:
+    """Cache policy for /videos/*: whitelists the three CloudFront-* signed
+    cookies so the edge can validate them (they are consumed, never keyed),
+    while keeping segment caching with long TTLs. Idempotent by name."""
+    name = "svg-signed-videos"
+    existing = cf.list_cache_policies().get("CachePolicyList", {}).get("Items", [])
+    for item in existing:
+        if item and item["CachePolicy"]["CachePolicyConfig"]["Name"] == name:
+            return item["CachePolicy"]["Id"]
+    resp = cf.create_cache_policy(CachePolicyConfig={
+        "Name": name,
+        "Comment": "Signed-cookie validation for private video playback",
+        "DefaultTTL": 86400,
+        "MaxTTL": 31536000,
+        "MinTTL": 1,
+        "ParametersInCacheKeyAndForwardedToOrigin": {
+            "CookiesConfig": {
+                "CookieBehavior": "whitelist",
+                "Cookies": {"Quantity": 3, "Items": [
+                    "CloudFront-Key-Pair-Id", "CloudFront-Policy",
+                    "CloudFront-Signature",
+                ]},
+            },
+            "HeadersConfig": {"HeaderBehavior": "none"},
+            "QueryStringsConfig": {"QueryStringBehavior": "none"},
+            "EnableAcceptEncodingBrotli": True,
+            "EnableAcceptEncodingGzip": True,
+        },
+    })
+    print(f"Cache policy created: {name}")
+    return resp["CachePolicy"]["Id"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-wait", action="store_true",
@@ -55,6 +88,7 @@ def main() -> None:
 
     s3_origin_id = config["DefaultCacheBehavior"]["TargetOriginId"]
     api_origin_id = "api-gateway-origin"
+    video_cache_policy = ensure_video_cache_policy(cf)
 
     origins = config["Origins"].get("Items", [])
 
@@ -137,7 +171,7 @@ def main() -> None:
                            allowed=["GET", "HEAD", "OPTIONS", "PUT", "PATCH",
                                     "POST", "DELETE"],
                            origin_request_policy=MANAGED_ALL_VIEWER_EXCEPT_HOST),
-        "/videos/*": behavior("/videos/*", s3_origin_id, MANAGED_CACHING_OPTIMIZED, True),
+        "/videos/*": behavior("/videos/*", s3_origin_id, video_cache_policy, True),
     }
 
     existing = config["CacheBehaviors"].get("Items", [])
