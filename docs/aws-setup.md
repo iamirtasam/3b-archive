@@ -59,7 +59,7 @@ When the distribution is created, the console offers a **"Copy policy"** button 
 
 **CLI equivalent (summary):** create an origin access control, then the distribution with that OAC and the key group, then attach the generated bucket policy. Honestly, this one is easier in the console the first time.
 
-Note your **distribution domain name**: `d1234abcd.cloudfront.net`.
+Note your **distribution domain name**: `d31uqelgcxwhug.cloudfront.net`.
 
 ## 4. Verify the privacy works
 
@@ -81,7 +81,7 @@ Console → *Billing → Budgets → Create budget → Zero spend budget*. With 
 
 | Item | Cost |
 | --- | --- |
-| S3 storage (500 GB) | ≈ $11.50 / month |
+| S3 storage (320 GB) | ≈ $8 / month |
 | CloudFront egress | $0 up to 1 TB / month |
 | CloudFront key groups, OAC | Free |
 | This whole setup | One-time, $0 |
