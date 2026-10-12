@@ -283,7 +283,7 @@ def ensure_api(session: boto3.session.Session) -> str:
     apigw = session.client("apigatewayv2")
     fn_arn = lam.get_function(FunctionName=FUNCTION_NAME)["Configuration"]["FunctionArn"]
 
-    existing = apigw.get_apis(Name=API_NAME)["Items"]
+    existing = [a for a in apigw.get_apis()["Items"] if a.get("Name") == API_NAME]
     if existing:
         api = existing[0]
         print(f"HTTP API exists: {api['ApiId']}")
