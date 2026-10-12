@@ -33,6 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default="config.json", help="Path to config.json")
     parser.add_argument("--source", help="Folder containing recordings (overrides config)")
     parser.add_argument("--limit", type=int, help="Process at most N files this run")
+    parser.add_argument("--max-size-mb", type=int, help="Only process files up to this size (for test runs)")
     parser.add_argument("--force", action="store_true", help="Re-prepare even if already done")
     parser.add_argument("--dry-run", action="store_true", help="List work without doing it")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     if args.limit:
         files = files[: args.limit]
+    if args.max_size_mb:
+        files = [p for p in files if p.stat().st_size <= args.max_size_mb * 1024 * 1024]
     log.info("Found %d video file(s) under %s", len(files), source_dir)
 
     catalog = cat.load(catalog_path)
