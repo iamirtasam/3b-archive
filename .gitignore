@@ -1,0 +1,31 @@
+# --- Secrets & local config (never commit these) ---
+config.json
+*.pem
+*.key
+credentials.json
+.env
+
+# --- Local working data (catalogs, HLS intermediates, state DB) ---
+.data/
+catalog.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Tooling caches ---
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- OS junk ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/
