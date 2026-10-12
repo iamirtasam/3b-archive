@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 CONTENT_TYPES = {
     ".m3u8": "application/vnd.apple.mpegurl",
     ".ts": "video/mp2t",
+    ".m4s": "video/iso.segment",
+    ".mp4": "video/mp4",
     ".mp4": "video/mp4",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",

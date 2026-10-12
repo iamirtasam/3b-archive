@@ -144,7 +144,9 @@ def _process_one(
         segment_seconds=segment_seconds,
         ffmpeg=ffmpeg_bin,
     )
-    segment_count = sum(1 for p in out_dir.iterdir() if p.suffix == ".ts")
+    segment_count = sum(
+        1 for p in out_dir.iterdir() if p.suffix in (".ts", ".m4s")
+    )
 
     thumbnail = make_thumbnail(
         source,

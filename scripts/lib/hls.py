@@ -61,7 +61,12 @@ def prepare(
 def remux_to_hls(
     source: Path, out_dir: Path, *, segment_seconds: int, ffmpeg: str = "ffmpeg"
 ) -> Path:
-    """Remux a video into HLS without re-encoding (lossless and fast)."""
+    """Remux a video into HLS without re-encoding (lossless and fast).
+
+    Uses fMP4 segments (init.mp4 + .m4s), not MPEG-TS: browsers demux fMP4
+    AAC flawlessly, while copied AAC in MPEG-TS can turn muddy after the
+    first segment boundary. Still -c copy, so still lossless.
+    """
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(source),
@@ -72,7 +77,8 @@ def remux_to_hls(
         "-hls_list_size", "0",
         "-hls_playlist_type", "vod",
         "-hls_flags", "independent_segments",
-        "-hls_segment_filename", str(out_dir / "seg_%05d.ts"),
+        "-hls_segment_type", "fmp4",
+        "-hls_segment_filename", str(out_dir / "seg_%05d.m4s"),
         str(out_dir / PLAYLIST_NAME),
     ]
     _run(cmd, source)
@@ -96,7 +102,8 @@ def transcode_to_hls(
         "-hls_list_size", "0",
         "-hls_playlist_type", "vod",
         "-hls_flags", "independent_segments",
-        "-hls_segment_filename", str(out_dir / "seg_%05d.ts"),
+        "-hls_segment_type", "fmp4",
+        "-hls_segment_filename", str(out_dir / "seg_%05d.m4s"),
         str(out_dir / PLAYLIST_NAME),
     ]
     _run(cmd, source)
