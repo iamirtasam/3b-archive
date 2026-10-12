@@ -1,9 +1,17 @@
-"""Promote browser-staged uploads into playable archive videos.
+"""Publish browser-staged uploads from your PC (the manual fallback).
 
 Usage:
     python scripts/publish.py                # package + upload everything staged
     python scripts/publish.py --dry-run      # show what would happen
     python scripts/publish.py --keep-source  # keep the staged original afterwards
+
+Since auto-packaging landed, the Lambda does this itself a couple of
+minutes after each upload finishes - you normally never run this script.
+It remains the fallback for edge cases the Lambda rejects:
+
+    - files over the 8 GB browser-upload cap (upload those via
+      scripts/pipeline.py from D:/Recordings instead)
+    - sources whose codecs cannot be stream-copied (e.g. not H.264/AAC)
 
 The web uploader (site #/upload) streams original recordings straight to
 S3 under uploads/<username>/<filename>. This script closes the loop on
@@ -21,8 +29,10 @@ HLS folders, so an interrupted publish simply continues where it stopped.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +84,15 @@ def download(s3, key: str, dest: Path) -> None:
     log.info("downloaded %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
 
 
+def staged_slug(key: str, filename: str) -> str:
+    """Identical to the Lambda's _slug_for: sanitized stem + first 8 hex of
+    md5(key). Matching slugs keep the two paths idempotent against each
+    other - re-running this on an auto-packaged file is a no-op."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    base = re.sub(r"[^a-z0-9-_]+", "-", stem.lower()).strip("-") or "video"
+    return f"{base}-{hashlib.md5(key.encode()).hexdigest()[:8]}"
+
+
 def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
     """Returns True when the item is fully published (or was skipped)."""
     dest: Path = item["local"]
@@ -86,12 +105,7 @@ def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
         hls_dir = WORK_DIR / "hls" / entry["slug"]
         thumb_path = WORK_DIR / "thumbs" / f"{entry['slug']}.jpg"
     else:
-        # Same slug the packaging step below will compute.
-        base_slug = "".join(
-            c if c.isalnum() or c in "-_" else "-"
-            for c in item["filename"].rsplit(".", 1)[0].lower()
-        ).strip("-") or "staged-upload"
-        slug = f"{base_slug}-{item['key'].split('/')[-1][-4:]}"
+        slug = staged_slug(item["key"], item["filename"])
         hls_dir = WORK_DIR / "hls" / slug
         thumb_path = WORK_DIR / "thumbs" / f"{slug}.jpg"
 
@@ -110,13 +124,9 @@ def publish_one(s3, item: dict, *, keep_source: bool, dry_run: bool) -> bool:
         if summary["duration_seconds"] <= 0:
             raise ValueError(f"{item['filename']} has no readable video/audio")
 
-        # Stable slug from the staged filename (colons from the pseudo key
-        # would break make_slug's path handling on Windows).
-        base_slug = "".join(
-            c if c.isalnum() or c in "-_" else "-"
-            for c in item["filename"].rsplit(".", 1)[0].lower()
-        ).strip("-") or "staged-upload"
-        out_dir = WORK_DIR / "hls" / f"{base_slug}-{item['key'].split('/')[-1][-4:]}"
+        # Stable slug, identical to the Lambda packager's.
+        slug = staged_slug(item["key"], item["filename"])
+        out_dir = WORK_DIR / "hls" / slug
         hls_dir = out_dir
         playlist, reencoded = hls.prepare(
             dest, out_dir, summary=summary,
