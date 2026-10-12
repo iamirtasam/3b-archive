@@ -100,7 +100,7 @@ def main() -> None:
         default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
 
     def behavior(path: str, target: str, cache_policy: str,
-                 with_key_groups: bool) -> dict:
+                 with_key_groups: bool, allowed: list | None = None) -> dict:
         b = json.loads(json.dumps({
             k: v for k, v in default.items()
             if k not in ("TargetOriginId", "PathPattern")
@@ -115,10 +115,13 @@ def main() -> None:
         b.pop("TrustedKeyGroups", None)
         if with_key_groups and key_groups:
             b["TrustedKeyGroups"] = key_groups
+        if allowed:
+            b["AllowedMethods"] = {"Quantity": len(allowed), "Items": allowed}
         return b
 
     wanted = {
-        "/api/*": behavior("/api/*", api_origin_id, MANAGED_CACHING_DISABLED, False),
+        "/api/*": behavior("/api/*", api_origin_id, MANAGED_CACHING_DISABLED,
+                           False, allowed=["GET", "HEAD", "POST", "OPTIONS"]),
         "/videos/*": behavior("/videos/*", s3_origin_id, MANAGED_CACHING_OPTIMIZED, True),
     }
 
