@@ -314,7 +314,7 @@
   const PART_CONCURRENCY = 3;
   const PART_RETRIES = 3;
 
-  async function uploadFile(file) {
+  async function uploadFile(file, isRetry = false) {
     uploadCard(file);
     const startedAt = Date.now();
 
@@ -339,11 +339,13 @@
     let lastTick = Date.now(), lastBytes = 0;
 
     // Which parts are already on S3? (resume after close/refresh)
+    let probeOk = false;
     try {
       const probe = await api(`/api/uploads/${meta.uploadId}`, {
         body: { key: meta.key, from_part: 1, to_part: 0 },
       });
       if (probe.status === 200) {
+        probeOk = true;
         for (const p of probe.data.received || []) {
           completed.set(p.part_number, p.etag);
           uploadedBytes += p.size;
@@ -389,8 +391,20 @@
     };
 
     try {
-      await Promise.all(Array.from({ length: PART_CONCURRENCY }, worker));
+      if (!probeOk || completed.size < total) {
+        await Promise.all(Array.from({ length: PART_CONCURRENCY }, worker));
+      }
     } catch (err) {
+      // A dead multipart session (expired/aborted on S3) is unrecoverable in
+      // place — drop the stale session once and restart the file cleanly.
+      if (!isRetry && /not found|expired|aborted|NoSuchUpload/i.test(err.message || "")) {
+        await api("/api/uploads/abort", {
+          body: { key: meta.key, upload_id: meta.uploadId },
+        }).catch(() => {});
+        clearMeta(file);
+        presignCache.clear();
+        return uploadFile(file, true);
+      }
       setProgress(file, (uploadedBytes / file.size) * 100,
         "PAUSED — REOPEN TO RESUME", err.message);
       return; // meta stays in localStorage: next visit resumes
@@ -402,11 +416,13 @@
                      ({ part_number, etag })) },
     });
     if (done.status !== 200) {
-      setProgress(file, 100, "FINISH FAILED — REOPEN TO RESUME", done.data.error || "");
+      // All bytes are on S3; a later reopen probes the parts and re-completes.
+      setProgress(file, 100, "FINISH FAILED — REOPEN TO RESUME",
+        (done.data.error || "").toUpperCase());
       return;
     }
     const secs = (Date.now() - startedAt) / 1000;
-    setProgress(file, 100, "STAGED ✓",
+    setProgress(file, 100, "STAGED ✓ — RUN publish.py TO MAKE IT PLAYABLE",
       `${fmtBytes(file.size / Math.max(secs, 1))}/S AVG`);
     clearMeta(file);
     refreshStaged();
@@ -425,7 +441,7 @@
       row.className = "staged-row";
       row.innerHTML = `
         <span class="video-title">${up.filename}</span>
-        <span class="mono-label">${up.owner === state.username ? "YOURS — AWAITING PACKAGING" : up.owner.toUpperCase()}</span>
+        <span class="mono-label">${up.owner === state.username ? "YOURS — AWAITING publish.py" : up.owner.toUpperCase()}</span>
         <button class="btn btn-ghost btn-sm staged-abort">DISCARD</button>`;
       row.querySelector(".staged-abort").onclick = async () => {
         await api("/api/uploads/abort", {
