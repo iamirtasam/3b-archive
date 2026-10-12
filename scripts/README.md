@@ -76,6 +76,17 @@ s3://my-video-archive/videos/talks-intro-9f2c41ab/
 
 Once uploaded, the HLS playlist URL (via CloudFront) is what your website and iOS app will play.
 
+### 4. Watch a video (signed playback URL)
+
+```powershell
+python sign-url.py list                                  # see uploaded slugs
+python sign-url.py valorant-2026-05-29-13-50-45-02-3aae6ecb
+```
+
+Paste the printed URL into **VLC → Media → Open Network Stream** (or Safari, or any hls.js page). The URL is valid 4 hours by default (`--hours 8` to change) and unlocks that one video's playlist, segments, and thumbnail — nothing else.
+
+Requires the `cloudfront` block in `config.json` (domain, key pair ID, private key path) from the AWS setup. Note: HLS needs one signed policy covering the whole video folder — per-file signed URLs would 403 on every segment fetch.
+
 ## Good to know
 
 - **Remux vs transcode** — H.264/AAC files (almost all phone and screen recordings) are remuxed instantly and losslessly. Anything exotic triggers an automatic fallback transcode (slower, still fine). The log tells you which path each file took.
