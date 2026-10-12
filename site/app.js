@@ -9,6 +9,7 @@
     login: $("login-view"),
     app: $("app-view"),
     player: $("player-view"),
+    upload: $("upload-view"),
   };
 
   const state = { videos: [], username: null, folder: null, hls: null };
