@@ -422,10 +422,33 @@
       return;
     }
     const secs = (Date.now() - startedAt) / 1000;
-    setProgress(file, 100, "STAGED ✓ — RUN publish.py TO MAKE IT PLAYABLE",
+    setProgress(file, 100, "UPLOADED — PACKAGING…",
       `${fmtBytes(file.size / Math.max(secs, 1))}/S AVG`);
     clearMeta(file);
     refreshStaged();
+    await waitForLive(file, done.data.slug);
+  }
+
+  // The Lambda packaging job runs for a minute or two after complete; poll
+  // the catalog until the video shows up, then reload the archive live.
+  async function waitForLive(file, slug) {
+    if (!slug) {
+      setProgress(file, 100, "LIVE SOON — REFRESH HOME PAGE", "");
+      return;
+    }
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 8000));
+      const r = await api("/api/videos").catch(() => ({ status: 0 }));
+      if (r.status === 200 &&
+          (r.data.videos || []).some((v) => v.slug === slug)) {
+        setProgress(file, 100, "LIVE ✓ — ON THE ARCHIVE",
+          "CLICK HOME TO WATCH");
+        if (typeof enterApp === "function") enterApp(r.data);
+        return;
+      }
+    }
+    setProgress(file, 100, "STILL PACKAGING — CHECK HOME PAGE SOON",
+      "OVERSIZED OR ODD CODEC? RUN publish.py");
   }
 
   /* ---------------- staged list ----------------------------------------- */
