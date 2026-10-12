@@ -394,9 +394,10 @@ def _package_job(event: dict) -> dict:
 
     try:
         obj = s3.get_object(Bucket=BUCKET, Key=key)
+        # Pass 1 - the remux. Stream copy only, single output: the same
+        # recipe as scripts/lib/hls.py, fed from S3 through a pipe.
         cmd = [
             FFMPEG, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
-            # fMP4 HLS, stream copy only - same recipe as scripts/lib/hls.py
             "-i", "pipe:0",
             "-map", "0:v:0", "-map", "0:a:0?", "-sn",
             "-c", "copy",
@@ -407,10 +408,6 @@ def _package_job(event: dict) -> dict:
             "-hls_segment_type", "fmp4",
             "-hls_segment_filename", "seg_%05d.m4s",
             "index.m3u8",
-            # second output: poster frame (decoded briefly, then done)
-            "-map", "0:v:0", "-ss", "3",
-            "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3",
-            "thumbnail.jpg",
         ]
         proc = subprocess.Popen(
             cmd, cwd=str(work), stdin=subprocess.PIPE,
@@ -446,6 +443,34 @@ def _package_job(event: dict) -> dict:
             return {"ok": False, "reason": "codec", "codec": vcodec}
 
         duration = _playlist_duration(work / "index.m3u8")
+
+        # Pass 2 - poster frame from the first segment. init.mp4 + one
+        # segment concatenated is a valid fMP4 file, seekable on disk, so
+        # the thumbnail needs nothing more from the source.
+        thumb_ok = False
+        segments = sorted(work.glob("seg_*.m4s"))
+        if segments and (work / "init.mp4").exists():
+            combined = work / "first.mp4"
+            combined.write_bytes(
+                (work / "init.mp4").read_bytes() + segments[0].read_bytes())
+            for seek in ("0.5", "0"):
+                cut = subprocess.run(
+                    [FFMPEG, "-hide_banner", "-loglevel", "error",
+                     "-nostdin", "-y", "-ss", seek, "-i", "first.mp4",
+                     "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3",
+                     "thumbnail.jpg"],
+                    cwd=str(work), capture_output=True)
+                if cut.returncode == 0 and (work / "thumbnail.jpg").exists():
+                    thumb_ok = True
+                    break
+            combined.unlink(missing_ok=True)
+            if not thumb_ok:
+                print(f"PACKAGE thumbnail failed for {slug} "
+                      f"(publishing without one)")
+        else:
+            print(f"PACKAGE no segments for {slug}")
+            raise RuntimeError("ffmpeg produced no video segments")
+
         _upload_hls(work, slug)
         _table(VIDEOS_TABLE).put_item(Item={
             "slug": slug,
@@ -456,7 +481,8 @@ def _package_job(event: dict) -> dict:
             "height": height or 0,
         })
         s3.delete_object(Bucket=BUCKET, Key=key)   # staged original consumed
-        print(f"PACKAGE ok {slug}: {duration:.0f}s {width}x{height}")
+        print(f"PACKAGE ok {slug}: {duration:.0f}s {width}x{height} "
+              f"thumb={'yes' if thumb_ok else 'no'}")
         return {"ok": True, "slug": slug}
     except Exception as err:  # noqa: BLE001 - keep staged file on any failure
         print(f"PACKAGE failed {key}: {err!r}")
