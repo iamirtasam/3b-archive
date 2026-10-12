@@ -117,11 +117,16 @@ def main() -> None:
             b["TrustedKeyGroups"] = key_groups
         if allowed:
             b["AllowedMethods"] = {"Quantity": len(allowed), "Items": allowed}
+            # CloudFront only accepts fixed method combinations; POST requires
+            # the full set, and CachedMethods must be a valid subset.
+            b["CachedMethods"] = {"Quantity": 3, "Items": ["GET", "HEAD", "OPTIONS"]}
         return b
 
     wanted = {
         "/api/*": behavior("/api/*", api_origin_id, MANAGED_CACHING_DISABLED,
-                           False, allowed=["GET", "HEAD", "POST", "OPTIONS"]),
+                           False,
+                           allowed=["GET", "HEAD", "OPTIONS", "PUT", "PATCH",
+                                    "POST", "DELETE"]),
         "/videos/*": behavior("/videos/*", s3_origin_id, MANAGED_CACHING_OPTIMIZED, True),
     }
 
