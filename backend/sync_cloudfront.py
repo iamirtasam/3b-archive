@@ -118,8 +118,7 @@ def main() -> None:
         if allowed:
             b["AllowedMethods"] = {"Quantity": len(allowed), "Items": allowed}
             # CloudFront only accepts fixed method combinations; POST requires
-            # the full set, and CachedMethods must be a valid subset.
-            b["CachedMethods"] = {"Quantity": 3, "Items": ["GET", "HEAD", "OPTIONS"]}
+            # the full set. (CachedMethods belongs to the cache policy here.)
         return b
 
     wanted = {
