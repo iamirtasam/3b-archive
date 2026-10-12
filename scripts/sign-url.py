@@ -80,6 +80,23 @@ def main(argv: list[str] | None = None) -> None:
     print("Test in  : VLC > Media > Open Network Stream (paste the URL above)")
 
 
+def _cf_b64(data: bytes) -> str:
+    """Base64 in CloudFront's custom URL-safe alphabet.
+
+    CloudFront does not use the standard RFC 4648 urlsafe alphabet:
+    '+' becomes '-', but '/' becomes '~' (not '_'), and '=' padding
+    becomes '_' (it is not stripped). Getting this wrong produces
+    'MalformedSignature: Could not unencode Signature' errors.
+    """
+    return (
+        base64.b64encode(data)
+        .replace(b"+", b"-")
+        .replace(b"=", b"_")
+        .replace(b"/", b"~")
+        .decode("ascii")
+    )
+
+
 def _signed_url(resource: str, key_id: str, private_key_pem: str, expires: datetime) -> str:
     """Sign a custom policy with a wildcard resource (needed for HLS folders)."""
     policy = json.dumps({
@@ -96,13 +113,10 @@ def _signed_url(resource: str, key_id: str, private_key_pem: str, expires: datet
     key = load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
     signature = key.sign(policy.encode("utf-8"), padding.PKCS1v15(), hashes.SHA1())
 
-    def b64url(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
     return (
         f"{resource.rstrip('*')}index.m3u8"
-        f"?Policy={b64url(policy.encode('utf-8'))}"
-        f"&Signature={b64url(signature)}"
+        f"?Policy={_cf_b64(policy.encode('utf-8'))}"
+        f"&Signature={_cf_b64(signature)}"
         f"&Key-Pair-Id={key_id}"
     )
 
