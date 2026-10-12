@@ -111,19 +111,31 @@ def main() -> None:
     # rejects sparse behaviors (SmoothStreaming, Compress, field-level TTLs, ...),
     # so every new behavior must carry the full field set.
     default = config["DefaultCacheBehavior"]
+
+    def find_key_groups() -> dict:
+        """Locate the signing key group: first in existing behaviors, then in
+        the account. Refuses to continue without one - /videos/* must never
+        deploy without its privacy wall."""
+        candidates = list(config["CacheBehaviors"].get("Items", [])) + [default]
+        for b in candidates:
+            kg = b.get("TrustedKeyGroups") or {}
+            if kg.get("Enabled", True) and kg.get("Quantity", 0) > 0:
+                return {"Enabled": True, "Quantity": kg["Quantity"],
+                        "Items": kg["Items"]}
+        groups = cf.list_key_groups().get("KeyGroupList", {}).get("Items", [])
+        if len(groups) == 1:
+            gid = groups[0]["KeyGroup"]["Id"]
+            print(f"Key group from account: {gid}")
+            return {"Enabled": True, "Quantity": 1, "Items": [gid]}
+        raise SystemExit(
+            "No trusted key groups found - refusing to update, because "
+            "/videos/* would be deployed without its privacy wall."
+        )
+
+    key_groups = find_key_groups()
     # Omitting TrustedKeyGroups on update makes CloudFront KEEP the old value;
     # it must be explicitly disabled to make the default behavior public.
-    kg = default.get("TrustedKeyGroups") or {}
-    if kg.get("Enabled", True) and kg.get("Quantity", 0) > 0:
-        key_groups = {"Enabled": True, "Quantity": kg["Quantity"], "Items": kg["Items"]}
-    else:
-        key_groups = None
     default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
-    if not key_groups:
-        raise SystemExit(
-            "No trusted key groups found on the default behavior - refusing to "
-            "update, because /videos/* would be deployed without its privacy wall."
-        )
 
     def behavior(path: str, target: str, cache_policy: str,
                  with_key_groups: bool, allowed: list | None = None,
