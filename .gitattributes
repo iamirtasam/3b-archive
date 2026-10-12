@@ -1,0 +1,17 @@
+# Normalize line endings across platforms
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.m3u8 text
+
+# Binary media - never touch
+*.png binary
+*.jpg binary
+*.ts binary
+*.mp4 binary
+*.mov binary
+*.mkv binary
