@@ -4,7 +4,7 @@ A self-hosted, YouTube-style video streaming platform built on AWS — your own 
 
 ## Why this exists
 
-I have roughly 500 GB of video recordings and wanted to watch them anywhere — in a browser or on my iPhone — without downloading files, without subscription fees, and without handing them to a third-party service. So this project does the obvious-but-fiddly thing: store the videos in Amazon S3, package them for proper streaming, and put a private, signed-URL-protected front end on top.
+I have roughly 320 GB of video recordings and wanted to watch them anywhere — in a browser or on my iPhone — without downloading files, without subscription fees, and without handing them to a third-party service. So this project does the obvious-but-fiddly thing: store the videos in Amazon S3, package them for proper streaming, and put a private, signed-URL-protected front end on top.
 
 The playback experience is the familiar one — videos start instantly, seeking is fast, and only the few seconds of video you are actually watching travel over the wire. Nothing is "downloaded" in any meaningful sense.
 
@@ -73,11 +73,11 @@ Interrupted? Run it again — it resumes exactly where it stopped. Your PC is on
 
 | Item | Cost |
 | --- | --- |
-| S3 storage (500 GB) | ≈ $11.50 / month |
+| S3 storage (320 GB) | ≈ $8 / month |
 | CloudFront egress | $0 — first 1 TB/month is free |
 | ffmpeg remuxing | $0 (runs on your PC, lossless) |
 | Backend (Lambda + DynamoDB) | ≈ $0 (free tier) |
-| **Total** | **≈ $12 / month** |
+| **Total** | **≈ $8 / month** |
 
 ## Privacy model
 
@@ -86,11 +86,12 @@ The S3 bucket blocks all public access. The only way in is through CloudFront UR
 ## Roadmap
 
 - [x] **Phase 1** — AWS setup + local remux/upload pipeline (this repo)
-- [ ] **Phase 2** — bulk migration of the full 500 GB library
+- [ ] **Phase 2** — bulk migration of the 320 GB library
 - [ ] **Phase 3** — backend: login, folder catalog, signed URL issuing (Lambda + API Gateway + DynamoDB)
 - [ ] **Phase 4** — website: folder browse → gallery → HLS player
-- [ ] **Phase 5** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
-- [ ] **Phase 6** — region migration script (ap-south-1 → eu-central-1) and niceties
+- [ ] **Phase 5** — web uploader: browser file picker with multipart upload progress, live speed, and ETA (presigned S3 URLs)
+- [ ] **Phase 6** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
+- [ ] **Phase 7** — region migration script (ap-south-1 → eu-central-1) and niceties
 
 ## FAQ
 
