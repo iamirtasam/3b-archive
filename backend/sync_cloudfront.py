@@ -113,9 +113,17 @@ def main() -> None:
     default = config["DefaultCacheBehavior"]
     # Omitting TrustedKeyGroups on update makes CloudFront KEEP the old value;
     # it must be explicitly disabled to make the default behavior public.
-    key_groups = default.get("TrustedKeyGroups")
-    if key_groups:
-        default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
+    kg = default.get("TrustedKeyGroups") or {}
+    if kg.get("Enabled", True) and kg.get("Quantity", 0) > 0:
+        key_groups = {"Enabled": True, "Quantity": kg["Quantity"], "Items": kg["Items"]}
+    else:
+        key_groups = None
+    default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
+    if not key_groups:
+        raise SystemExit(
+            "No trusted key groups found on the default behavior - refusing to "
+            "update, because /videos/* would be deployed without its privacy wall."
+        )
 
     def behavior(path: str, target: str, cache_policy: str,
                  with_key_groups: bool, allowed: list | None = None,
