@@ -31,6 +31,9 @@ REGION = CONFIG["aws"]["region"]
 
 MANAGED_CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 MANAGED_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+# Forwards every viewer header (cookies, content-type) to the origin except
+# Host, which must stay on the origin domain for API Gateway to accept it.
+MANAGED_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
 
 def main() -> None:
@@ -100,7 +103,8 @@ def main() -> None:
         default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
 
     def behavior(path: str, target: str, cache_policy: str,
-                 with_key_groups: bool, allowed: list | None = None) -> dict:
+                 with_key_groups: bool, allowed: list | None = None,
+                 origin_request_policy: str | None = None) -> dict:
         b = json.loads(json.dumps({
             k: v for k, v in default.items()
             if k not in ("TargetOriginId", "PathPattern")
@@ -115,6 +119,8 @@ def main() -> None:
         b.pop("TrustedKeyGroups", None)
         if with_key_groups and key_groups:
             b["TrustedKeyGroups"] = key_groups
+        if origin_request_policy:
+            b["OriginRequestPolicyId"] = origin_request_policy
         if allowed:
             # CloudFront only accepts fixed method combinations; POST requires
             # the full set. CachedMethods nests inside AllowedMethods.
@@ -129,7 +135,8 @@ def main() -> None:
         "/api/*": behavior("/api/*", api_origin_id, MANAGED_CACHING_DISABLED,
                            False,
                            allowed=["GET", "HEAD", "OPTIONS", "PUT", "PATCH",
-                                    "POST", "DELETE"]),
+                                    "POST", "DELETE"],
+                           origin_request_policy=MANAGED_ALL_VIEWER_EXCEPT_HOST),
         "/videos/*": behavior("/videos/*", s3_origin_id, MANAGED_CACHING_OPTIMIZED, True),
     }
 
