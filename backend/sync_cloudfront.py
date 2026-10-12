@@ -89,18 +89,23 @@ def main() -> None:
             origin["CustomOriginConfig"].setdefault("OriginKeepaliveTimeout", 5)
 
     # 2 + 3. /api/* and /videos/* behaviors ----------------------------------
+    # Clone the existing default behavior as a complete template: UpdateDistribution
+    # rejects sparse behaviors (SmoothStreaming, Compress, field-level TTLs, ...),
+    # so every new behavior must carry the full field set.
     default = config["DefaultCacheBehavior"]
     key_groups = default.pop("TrustedKeyGroups", None)  # moved to /videos/*
 
     def behavior(path: str, target: str, cache_policy: str,
                  with_key_groups: bool) -> dict:
-        b = {
-            "PathPattern": path,
-            "TargetOriginId": target,
-            "ViewerProtocolPolicy": "https-only",
-            "CachePolicyId": cache_policy,
-            "MinTTL": 0,
-        }
+        b = json.loads(json.dumps({
+            k: v for k, v in default.items()
+            if k not in ("TargetOriginId", "PathPattern")
+        }))
+        b["TargetOriginId"] = target
+        b["ViewerProtocolPolicy"] = "https-only"
+        b["CachePolicyId"] = cache_policy
+        b["MinTTL"] = 0
+        b.pop("TrustedKeyGroups", None)
         if with_key_groups and key_groups:
             b["TrustedKeyGroups"] = key_groups
         return b
