@@ -266,7 +266,7 @@ def ensure_function(
             Runtime="python3.12",
             Role=role_arn,
             Handler="app.handler.lambda_handler",
-            ZipFile=zip_path.read_bytes(),
+            Code={"ZipFile": zip_path.read_bytes()},
             Timeout=15,
             MemorySize=256,
             Environment=env,
