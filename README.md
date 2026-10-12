@@ -34,6 +34,18 @@ The videos are **remuxed, not re-encoded**. ffmpeg takes the existing H.264 stre
 │   ├── upload.py       Upload prepared videos to S3 (resumable, multipart)
 │   ├── pipeline.py     Both of the above in one command
 │   └── lib/            Shared helpers (ffmpeg, S3, catalog, thumbnails)
+├── site/               The website — served by CloudFront at the same domain
+│   ├── index.html      Login, archive, and player views (single page app)
+│   ├── app.js          Routing, HLS playback, resume, cookie-based auth
+│   └── styles.css      Brutalist editorial design system
+├── backend/            Lambda API + deployment tooling
+│   ├── app/handler.py  Login, logout, video catalog, stream auth (signed cookies)
+│   ├── deploy.py       Idempotent backend provisioning (DynamoDB, SSM, Lambda, HTTP API)
+│   ├── sync_cloudfront.py  Wire site + API + videos into one distribution
+│   ├── deploy_site.py  Upload the website and invalidate the CDN cache
+│   ├── create_user.py  Create a viewer account
+│   ├── seed_catalog.py Sync the local catalog into DynamoDB
+│   └── e2e_test.py     End-to-end verification of the whole stack
 ├── docs/
 │   └── aws-setup.md    One-time cloud setup: bucket, CloudFront, signing keys
 └── config.example.json Copy to config.json and edit
@@ -69,6 +81,30 @@ python scripts/pipeline.py --source "H:\Recordings\Batch 3"
 
 Interrupted? Run it again — it resumes exactly where it stopped. Your PC is only needed for these few minutes or hours of packaging and uploading; streaming afterwards is entirely on AWS.
 
+## How the site works
+
+One CloudFront distribution serves everything from a single domain — `https://d31uqelgcxwhug.cloudfront.net`:
+
+| Path | Served by | Access |
+| --- | --- | --- |
+| `/` | Site files in S3 (`index.html`, `app.js`, …) | Public — it's just the app shell, no data |
+| `/api/*` | API Gateway → Lambda (login, catalog, stream auth) | Public endpoints, authenticated logic |
+| `/videos/*` | The HLS videos in S3 | Signed cookies required — 403 for everyone else |
+
+Because the site, the API, and the videos share one domain, logging in sets CloudFront signed cookies once and the browser attaches them to every playlist, segment, and API call automatically. No CORS, no per-URL signatures, no juggling tokens. Expired playback cookies renew themselves mid-stream via `/api/stream-auth`.
+
+### Adding new users
+
+```powershell
+python backend\create_user.py <username> <password>
+```
+
+### Deploying the site after changes
+
+```powershell
+python backend\deploy_site.py
+```
+
 ## Costs
 
 | Item | Cost |
@@ -81,14 +117,14 @@ Interrupted? Run it again — it resumes exactly where it stopped. Your PC is on
 
 ## Privacy model
 
-The S3 bucket blocks all public access. The only way in is through CloudFront URLs signed with a private key held on your machine. The planned backend issues short-lived signed URLs only after login — so you plus the people you invite can watch, and nobody else. See `docs/aws-setup.md` for the exact setup.
+The S3 bucket blocks all public access. The only way in is through CloudFront, and every `/videos/*` request must carry cookies signed with a private key that lives in SSM Parameter Store — viewers get them only after logging in. So you plus the people you invite can watch, and everyone else gets a 403. See `docs/aws-setup.md` for the exact setup.
 
 ## Roadmap
 
 - [x] **Phase 1** — AWS setup + local remux/upload pipeline (this repo)
-- [ ] **Phase 2** — bulk migration of the 320 GB library
-- [ ] **Phase 3** — backend: login, folder catalog, signed URL issuing (Lambda + API Gateway + DynamoDB)
-- [ ] **Phase 4** — website: folder browse → gallery → HLS player
+- [x] **Phase 2** — first videos migrated (Valorant batch, 3.7 GB, 327 segments)
+- [x] **Phase 3** — backend: login, folder catalog, signed cookie issuing (Lambda + API Gateway + DynamoDB)
+- [x] **Phase 4** — website: brutalist login → folder browse → gallery → HLS player with resume
 - [ ] **Phase 5** — web uploader: browser file picker with multipart upload progress, live speed, and ETA (presigned S3 URLs)
 - [ ] **Phase 6** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
 - [ ] **Phase 7** — region migration script (ap-south-1 → eu-central-1) and niceties
