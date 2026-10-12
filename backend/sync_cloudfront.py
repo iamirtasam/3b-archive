@@ -53,7 +53,20 @@ def main() -> None:
     s3_origin_id = config["DefaultCacheBehavior"]["TargetOriginId"]
     api_origin_id = "api-gateway-origin"
 
-    # 1. API origin ---------------------------------------------------------
+    # Normalize fields the UpdateDistribution API requires on every origin
+    # (creates tolerate defaults; updates demand them explicitly).
+    for origin in origins:
+        origin.setdefault("OriginPath", "")
+        origin.setdefault("OriginCustomHeaders", {"Quantity": 0, "Items": []})
+        origin.setdefault("ConnectionAttempts", 3)
+        origin.setdefault("ConnectionTimeout", 10)
+        origin.setdefault("OriginShield", {"Enabled": False})
+        if "S3OriginConfig" in origin:
+            origin["S3OriginConfig"].setdefault("OriginAccessIdentity", "")
+        if "CustomOriginConfig" in origin:
+            origin["CustomOriginConfig"].setdefault("OriginReadTimeout", 30)
+            origin["CustomOriginConfig"].setdefault("OriginKeepaliveTimeout", 5)
+
     origins = config["Origins"].get("Items", [])
     if not any(o["Id"] == api_origin_id for o in origins):
         origins.append({
@@ -65,8 +78,6 @@ def main() -> None:
                 "HTTPSPort": 443,
                 "OriginProtocolPolicy": "https-only",
                 "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
-                "OriginReadTimeout": 30,
-                "OriginKeepaliveTimeout": 5,
             },
         })
         print(f"Origin added: {api_origin_id} -> {api_host}")
