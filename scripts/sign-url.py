@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--key-id", dest="key_id", help="CloudFront key pair ID")
     parser.add_argument("--private-key", help="Path to the private key .pem file")
     parser.add_argument("--hours", type=float, default=4.0, help="URL validity window (default 4h)")
+    parser.add_argument("--save-playlist", metavar="PATH",
+                        help="Also write a local .m3u8 with the signature baked into every "
+                             "segment URL - open that file in VLC (players drop the query "
+                             "string when resolving relative segment URLs, so the bare "
+                             "playlist URL fails in VLC even though it is valid)")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -78,6 +83,23 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\nResource : {resource}")
     print(f"Valid    : {expires.isoformat(timespec='seconds')}")
     print("Test in  : VLC > Media > Open Network Stream (paste the URL above)")
+
+    if args.save_playlist:
+        out = Path(args.save_playlist)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        query = url.split("index.m3u8", 1)[1]
+        # Fetch the real playlist and rewrite each segment line to a signed absolute URL.
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            lines = resp.read().decode("utf-8").splitlines()
+        rewritten = [
+            f"https://{domain}/{prefix}/{args.slug}/{line}{query}"
+            if line and not line.startswith("#") else line
+            for line in lines
+        ]
+        out.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        print(f"Saved    : {out} - open this file in VLC instead")
 
 
 def _cf_b64(data: bytes) -> str:
