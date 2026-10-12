@@ -496,6 +496,19 @@
   });
   $("refresh-staged-btn").addEventListener("click", refreshStaged);
 
+  // Drag a recording anywhere onto the upload page to start uploading it.
+  const dropZone = document.querySelector(".upload-main");
+  dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("dragging");
+  });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragging"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("dragging");
+    for (const file of e.dataTransfer.files) uploadFile(file);
+  });
+
   $("all-folders-btn").addEventListener("click", () => { location.hash = "#/"; });
 
   /* ---------------- boot -------------------------------------------------- */

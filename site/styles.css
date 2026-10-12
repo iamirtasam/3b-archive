@@ -344,6 +344,7 @@ main { flex: 1; width: min(var(--max-w), calc(100% - 32px)); margin: 0 auto; }
 /* ------------------------------------------------ upload */
 
 .upload-main { padding: 24px 0 var(--gap-section); }
+.upload-main.dragging { outline: 3px dashed var(--carbon); outline-offset: -24px; border-radius: var(--radius-card-lg); }
 .upload-main .display-lg { margin-bottom: 16px; }
 .upload-sub { color: var(--slate); max-width: 52ch; margin-bottom: 32px; }
 .upload-actions { display: flex; align-items: center; gap: 16px; margin-bottom: 40px; flex-wrap: wrap; }
