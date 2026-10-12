@@ -93,7 +93,11 @@ def main() -> None:
     # rejects sparse behaviors (SmoothStreaming, Compress, field-level TTLs, ...),
     # so every new behavior must carry the full field set.
     default = config["DefaultCacheBehavior"]
-    key_groups = default.pop("TrustedKeyGroups", None)  # moved to /videos/*
+    # Omitting TrustedKeyGroups on update makes CloudFront KEEP the old value;
+    # it must be explicitly disabled to make the default behavior public.
+    key_groups = default.get("TrustedKeyGroups")
+    if key_groups:
+        default["TrustedKeyGroups"] = {"Enabled": False, "Quantity": 0, "Items": []}
 
     def behavior(path: str, target: str, cache_policy: str,
                  with_key_groups: bool) -> dict:
