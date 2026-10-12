@@ -48,9 +48,13 @@ def human_size(num: float) -> str:
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configure root logging once for the CLI entry points."""
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format=LOG_FORMAT,
-        datefmt="%H:%M:%S",
-    )
+    """Configure root logging once for the CLI entry points.
+
+    Verbose mode raises only *our* loggers to DEBUG - the AWS SDK's own
+    debug output (request signatures, retries, wire details) stays quiet
+    even then, because it is thousands of lines per upload.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=level, format=LOG_FORMAT, datefmt="%H:%M:%S")
+    for noisy in ("botocore", "boto3", "s3transfer", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
