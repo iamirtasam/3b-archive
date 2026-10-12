@@ -22,13 +22,14 @@ SITE_DIR = ROOT / "site"
 BUCKET = CONFIG["s3"]["bucket"]
 DISTRIBUTION_ID = CONFIG.get("cloudfront", {}).get("distribution_id")
 
-# Cache policy: short TTL for app code (redeploys appear within 5 min),
-# long TTL for the vendored hls.js (content-addressed by filename).
+# Cache policy: app code must revalidate on every load (stale UI after a
+# deploy is far worse than a 304 round-trip). The vendored hls.js is
+# content-stable, so it gets a long immutable TTL.
 CACHE_RULES = {
     "index.html": ("text/html; charset=utf-8", "max-age=60"),
-    "styles.css": ("text/css; charset=utf-8", "max-age=300"),
-    "app.js": ("text/javascript; charset=utf-8", "max-age=300"),
-    "hls.min.js": ("text/javascript; charset=utf-8", "max-age=31536000"),
+    "styles.css": ("text/css; charset=utf-8", "max-age=0, must-revalidate"),
+    "app.js": ("text/javascript; charset=utf-8", "max-age=0, must-revalidate"),
+    "hls.min.js": ("text/javascript; charset=utf-8", "max-age=31536000, immutable"),
 }
 
 
