@@ -293,19 +293,27 @@ def _upload_complete(event: dict) -> dict:
     body = _parse_body(event)
     key = str(body.get("key", ""))
     upload_id = str(body.get("upload_id", ""))
-    parts = body.get("parts", [])
+    raw_parts = body.get("parts", [])
     if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
         return _json(403, {"error": "not your upload"})
-    if not upload_id or not parts:
+    if not upload_id or not raw_parts:
         return _json(400, {"error": "upload_id and parts are required"})
 
-    boto3.client("s3").complete_multipart_upload(
-        Bucket=BUCKET, Key=key, UploadId=upload_id,
-        MultipartUpload={"Parts": [
-            {"PartNumber": int(p["part_number"]), "ETag": str(p["etag"])}
-            for p in parts
-        ]},
+    # S3 rejects CompleteMultipartUpload unless part numbers ascend.
+    # Concurrent browser workers finish out of order, so sort here.
+    parts = sorted(
+        ({"PartNumber": int(p["part_number"]), "ETag": str(p["etag"])}
+         for p in raw_parts if p.get("etag")),
+        key=lambda p: p["PartNumber"],
     )
+    try:
+        boto3.client("s3").complete_multipart_upload(
+            Bucket=BUCKET, Key=key, UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+    except ClientError as err:
+        code = err.response.get("Error", {}).get("Code", "UnknownError")
+        return _json(409, {"error": f"S3 refused completion ({code})"})
     return _json(200, {"ok": True, "key": key})
 
 
