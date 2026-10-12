@@ -33,16 +33,18 @@ The videos are **remuxed, not re-encoded**. ffmpeg takes the existing H.264 stre
 │   ├── prepare.py      Package recordings into HLS (resumable, lossless)
 │   ├── upload.py       Upload prepared videos to S3 (resumable, multipart)
 │   ├── pipeline.py     Both of the above in one command
+│   ├── publish.py      Promote browser-staged uploads into playable videos
 │   └── lib/            Shared helpers (ffmpeg, S3, catalog, thumbnails)
 ├── site/               The website — served by CloudFront at the same domain
 │   ├── index.html      Login, archive, and player views (single page app)
 │   ├── app.js          Routing, HLS playback, resume, cookie-based auth
 │   └── styles.css      Brutalist editorial design system
 ├── backend/            Lambda API + deployment tooling
-│   ├── app/handler.py  Login, logout, video catalog, stream auth (signed cookies)
+│   ├── app/handler.py  Login, catalog, stream auth, upload presigning
 │   ├── deploy.py       Idempotent backend provisioning (DynamoDB, SSM, Lambda, HTTP API)
 │   ├── sync_cloudfront.py  Wire site + API + videos into one distribution
 │   ├── deploy_site.py  Upload the website and invalidate the CDN cache
+│   ├── ensure_cors.py  Bucket CORS for direct browser uploads
 │   ├── create_user.py  Create a viewer account
 │   ├── seed_catalog.py Sync the local catalog into DynamoDB
 │   └── e2e_test.py     End-to-end verification of the whole stack
@@ -88,10 +90,28 @@ One CloudFront distribution serves everything from a single domain — `https://
 | Path | Served by | Access |
 | --- | --- | --- |
 | `/` | Site files in S3 (`index.html`, `app.js`, …) | Public — it's just the app shell, no data |
-| `/api/*` | API Gateway → Lambda (login, catalog, stream auth) | Public endpoints, authenticated logic |
+| `/api/*` | API Gateway → Lambda (login, catalog, stream auth, upload presigning) | Public endpoints, authenticated logic |
 | `/videos/*` | The HLS videos in S3 | Signed cookies required — 403 for everyone else |
+| `uploads/*` (in S3) | Staged originals waiting for packaging | Presigned part URLs only |
 
 Because the site, the API, and the videos share one domain, logging in sets CloudFront signed cookies once and the browser attaches them to every playlist, segment, and API call automatically. No CORS, no per-URL signatures, no juggling tokens. Expired playback cookies renew themselves mid-stream via `/api/stream-auth`.
+
+### Uploading from the browser (Phase 5)
+
+Click **UPLOAD** in the site's nav bar (or drag recordings onto the upload page):
+
+1. The browser picks up your files and asks the Lambda for presigned part URLs
+2. It streams 16 MB chunks **directly to S3** — with a live progress bar, speed, and ETA; nothing flows through the API
+3. Close the tab mid-upload? Reopen the page and re-pick the file — it resumes from wherever S3 already has bytes
+4. Finished files sit in `uploads/` as *staged* originals
+
+Then, from your PC, close the loop (this is the one step a browser can't do, because packaging needs ffmpeg):
+
+```powershell
+python scripts\publish.py
+```
+
+That downloads each staged original, remuxes it to HLS losslessly, uploads the stream package, removes the staged copy, and refreshes the catalog — the videos appear on the site immediately. `--dry-run` previews; `--keep-source` retains the originals.
 
 ### Adding new users
 
@@ -103,6 +123,14 @@ python backend\create_user.py <username> <password>
 
 ```powershell
 python backend\deploy_site.py
+```
+
+### Backend / infrastructure updates
+
+```powershell
+python backend\deploy.py           # Lambda code, env, IAM
+python backend\sync_cloudfront.py  # distribution behaviors (rarely changes)
+python backend\ensure_cors.py      # bucket CORS for browser uploads (idempotent)
 ```
 
 ## Costs
@@ -125,7 +153,7 @@ The S3 bucket blocks all public access. The only way in is through CloudFront, a
 - [x] **Phase 2** — first videos migrated (Valorant batch, 3.7 GB, 327 segments)
 - [x] **Phase 3** — backend: login, folder catalog, signed cookie issuing (Lambda + API Gateway + DynamoDB)
 - [x] **Phase 4** — website: brutalist login → folder browse → gallery → HLS player with resume
-- [ ] **Phase 5** — web uploader: browser file picker with multipart upload progress, live speed, and ETA (presigned S3 URLs)
+- [x] **Phase 5** — web uploader: drag-and-drop or file picker, direct-to-S3 multipart with progress, speed, ETA, and refresh-proof resume; `publish.py` closes the loop from your PC
 - [ ] **Phase 6** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
 - [ ] **Phase 7** — region migration script (ap-south-1 → eu-central-1) and niceties
 

@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. Dates are when the phase landed.
 
+## 0.5.0 — Phase 5 (2026-10-12)
+
+### Added
+- Web uploader at `#/upload`: file picker plus drag-anywhere drop zone, in the same brutalist design language
+- Direct-to-S3 multipart uploads (16 MB parts, 3 concurrent) with presigned URLs — upload bytes never touch the API
+- Live progress per file: percent bar, parts counter, rolling speed, and ETA
+- Refresh-proof resume: S3's own part list is the source of truth — reopen the page, re-pick the file, continue where it stopped
+- Staged-uploads list with discard (abort multipart) support
+- `scripts/publish.py` — the PC-side loop closer: download staged originals, remux to fMP4 HLS, upload, clean up, seed the catalog; resumable at every step, with `--dry-run` and `--keep-source`
+- Upload API routes: start (presign), parts (presign page + received-parts list), complete, abort, list
+- Bucket CORS setup (`ensure_cors.py`) enabling browser PUTs with exposed ETags
+
+### Fixed
+- Deep links (`#/watch/<slug>`) now resolve on fresh page loads — the router waits for the catalog before first paint
+- `app.js`/`styles.css` served with `must-revalidate` so deploys reach browsers immediately instead of up to 5 minutes later
+- Lambda IAM: `s3:PutObject` granted for `CreateMultipartUpload` on the uploads prefix
+
+### Removed
+- The published test video and its artifacts after the end-to-end verification run
+
 ## 0.4.0 — Phase 4 (2026-10-12)
 
 ### Added
