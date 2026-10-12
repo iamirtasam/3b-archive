@@ -393,48 +393,38 @@ def _package_job(event: dict) -> dict:
     s3 = boto3.client("s3")
 
     try:
-        obj = s3.get_object(Bucket=BUCKET, Key=key)
+        # ffmpeg reads straight from a presigned S3 URL: its HTTP backend
+        # issues range requests, so MP4s with a trailing moov atom (typical
+        # for recordings) seek fine. A stdin pipe cannot seek and breaks
+        # exactly there - learned the hard way.
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BUCKET, "Key": key},
+            ExpiresIn=4000,
+        )
         # Pass 1 - the remux. Stream copy only, single output: the same
-        # recipe as scripts/lib/hls.py, fed from S3 through a pipe.
-        cmd = [
-            FFMPEG, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
-            "-i", "pipe:0",
-            "-map", "0:v:0", "-map", "0:a:0?", "-sn",
-            "-c", "copy",
-            "-f", "hls",
-            "-hls_time", "6", "-hls_list_size", "0",
-            "-hls_playlist_type", "vod",
-            "-hls_flags", "independent_segments",
-            "-hls_segment_type", "fmp4",
-            "-hls_segment_filename", "seg_%05d.m4s",
-            "index.m3u8",
-        ]
-        proc = subprocess.Popen(
-            cmd, cwd=str(work), stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # recipe as scripts/lib/hls.py. The source never touches /tmp, so
+        # file size is bounded by time, not scratch space.
+        remux = subprocess.run(
+            [
+                FFMPEG, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+                "-i", url,
+                "-map", "0:v:0", "-map", "0:a:0?", "-sn",
+                "-c", "copy",
+                "-f", "hls",
+                "-hls_time", "6", "-hls_list_size", "0",
+                "-hls_playlist_type", "vod",
+                "-hls_flags", "independent_segments",
+                "-hls_segment_type", "fmp4",
+                "-hls_segment_filename", "seg_%05d.m4s",
+                "index.m3u8",
+            ],
+            cwd=str(work), capture_output=True,
+            timeout=15 * 60 - 30)   # leave headroom for the uploads
+        stderr = remux.stderr.decode("utf-8", "replace")
 
-        stderr_chunks: list[bytes] = []
-        reader = threading.Thread(
-            target=lambda: stderr_chunks.append(proc.stderr.read()))
-        reader.start()
-
-        def feed() -> None:
-            try:
-                while chunk := obj["Body"].read(1024 * 1024):
-                    proc.stdin.write(chunk)
-            finally:
-                proc.stdin.close()
-
-        feeder = threading.Thread(target=feed)
-        feeder.start()
-        feeder.join()
-        code = proc.wait()
-        reader.join()
-        stderr = (stderr_chunks[0].decode("utf-8", "replace")
-                  if stderr_chunks else "")
-
-        if code != 0:
-            raise RuntimeError(f"ffmpeg exit {code}: {stderr[-600:]}")
+        if remux.returncode != 0:
+            raise RuntimeError(f"ffmpeg exit {remux.returncode}: {stderr[-600:]}")
 
         width, height, vcodec = _parse_streams(stderr)
         if vcodec != "h264":
@@ -443,33 +433,32 @@ def _package_job(event: dict) -> dict:
             return {"ok": False, "reason": "codec", "codec": vcodec}
 
         duration = _playlist_duration(work / "index.m3u8")
+        if duration <= 0:
+            raise RuntimeError("zero-length playlist - demux produced nothing")
 
-        # Pass 2 - poster frame from the first segment. init.mp4 + one
-        # segment concatenated is a valid fMP4 file, seekable on disk, so
-        # the thumbnail needs nothing more from the source.
-        thumb_ok = False
+        # Pass 2 - poster frame. init.mp4 + the first segment concatenated
+        # is a valid seekable fMP4 file, so the source is not needed again.
         segments = sorted(work.glob("seg_*.m4s"))
-        if segments and (work / "init.mp4").exists():
-            combined = work / "first.mp4"
-            combined.write_bytes(
-                (work / "init.mp4").read_bytes() + segments[0].read_bytes())
-            for seek in ("0.5", "0"):
-                cut = subprocess.run(
-                    [FFMPEG, "-hide_banner", "-loglevel", "error",
-                     "-nostdin", "-y", "-ss", seek, "-i", "first.mp4",
-                     "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3",
-                     "thumbnail.jpg"],
-                    cwd=str(work), capture_output=True)
-                if cut.returncode == 0 and (work / "thumbnail.jpg").exists():
-                    thumb_ok = True
-                    break
-            combined.unlink(missing_ok=True)
-            if not thumb_ok:
-                print(f"PACKAGE thumbnail failed for {slug} "
-                      f"(publishing without one)")
-        else:
-            print(f"PACKAGE no segments for {slug}")
+        if not segments or not (work / "init.mp4").exists():
             raise RuntimeError("ffmpeg produced no video segments")
+        combined = work / "first.mp4"
+        combined.write_bytes(
+            (work / "init.mp4").read_bytes() + segments[0].read_bytes())
+        thumb_ok = False
+        for seek in ("0.5", "0"):
+            cut = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin",
+                 "-y", "-ss", seek, "-i", "first.mp4",
+                 "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3",
+                 "thumbnail.jpg"],
+                cwd=str(work), capture_output=True)
+            if cut.returncode == 0 and (work / "thumbnail.jpg").exists():
+                thumb_ok = True
+                break
+        combined.unlink(missing_ok=True)
+        if not thumb_ok:
+            print(f"PACKAGE thumbnail failed for {slug} "
+                  f"(publishing without one)")
 
         _upload_hls(work, slug)
         _table(VIDEOS_TABLE).put_item(Item={
