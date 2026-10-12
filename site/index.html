@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DALAL ARCHIVE — Private Video Streaming</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@100..900&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23000'/%3E%3Cpath d='M12 9l12 7-12 7z' fill='%23d1ffca'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- ============================== LOGIN VIEW ============================== -->
+<section id="login-view" class="view" hidden>
+  <header class="topbar">
+    <div class="nav-pill">
+      <span class="nav-brand">DALAL<em>*</em></span>
+      <span class="nav-meta">PRIVATE VIDEO ARCHIVE</span>
+    </div>
+  </header>
+
+  <main class="login-main">
+    <div class="login-hero">
+      <h1 class="display-xl reveal">
+        <span class="reveal-line"><span>WATCH</span></span>
+        <span class="reveal-line"><span>ANYTHING.</span></span>
+        <span class="reveal-line"><span>ANYWHERE<span class="accent-dot">.</span></span></span>
+      </h1>
+      <p class="login-sub reveal-fade">
+        320&nbsp;GB of recordings, remuxed losslessly, streamed from
+        private storage. No downloads. No ads. Just play.
+      </p>
+      <div class="ticker reveal-fade" aria-hidden="true">
+        <div class="ticker-track" id="login-ticker">
+          <span>NOW STREAMING — PRIVATE ARCHIVE — HLS — 1080P60 — NO ADS — JUST PLAY —&nbsp;</span>
+          <span>NOW STREAMING — PRIVATE ARCHIVE — HLS — 1080P60 — NO ADS — JUST PLAY —&nbsp;</span>
+        </div>
+      </div>
+    </div>
+
+    <form id="login-form" class="card login-card reveal-fade" autocomplete="on">
+      <p class="mono-label">ACCESS — 01</p>
+      <h2 class="login-title">SIGN IN</h2>
+
+      <label class="field">
+        <span class="mono-label">USERNAME</span>
+        <input id="login-username" name="username" type="text"
+               autocomplete="username" required spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="mono-label">PASSWORD</span>
+        <input id="login-password" name="password" type="password"
+               autocomplete="current-password" required>
+      </label>
+
+      <p id="login-error" class="login-error" hidden></p>
+
+      <button type="submit" class="btn btn-solid btn-block" id="login-submit">
+        ENTER THE ARCHIVE
+      </button>
+      <p class="login-foot">Signed URLs, signed cookies, zero public access.
+        <span class="volt">Your videos, your rules.</span></p>
+    </form>
+  </main>
+
+  <footer class="foot">
+    <p class="mono-label">S3 × CLOUDFRONT × LAMBDA — BUILT BY IRTASAM</p>
+  </footer>
+</section>
+
+<!-- ============================== APP VIEW ================================ -->
+<section id="app-view" class="view" hidden>
+  <header class="topbar">
+    <div class="nav-pill">
+      <a class="nav-brand" href="#/" data-nav>DALAL<em>*</em></a>
+      <nav class="nav-links" id="folder-nav"><!-- folder links injected --></nav>
+      <span class="nav-user mono-label" id="nav-user"></span>
+      <button class="btn btn-ghost btn-sm" id="logout-btn">LOG OUT</button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <section class="app-hero" id="app-hero">
+      <h1 class="display-lg reveal" id="hero-title">
+        <span class="reveal-line"><span>THE</span></span>
+        <span class="reveal-line"><span>ARCHIVE<span class="accent-dot">.</span></span></span>
+      </h1>
+      <div class="app-hero-meta reveal-fade">
+        <span class="mint-tag" id="hero-count">— TITLES</span>
+        <span class="mono-label" id="hero-hours">— HOURS OF FOOTAGE</span>
+      </div>
+      <div class="ticker" aria-hidden="true">
+        <div class="ticker-track" id="app-ticker">
+          <span>NOW STREAMING —&nbsp;</span><span>NOW STREAMING —&nbsp;</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="folder-section">
+      <div class="section-head">
+        <h2 class="heading-secondary">FOLDERS</h2>
+        <button class="text-link" id="all-folders-btn" hidden>← SHOW EVERYTHING</button>
+      </div>
+      <div class="folder-grid" id="folder-grid"><!-- injected --></div>
+    </section>
+
+    <section id="video-section">
+      <div class="section-head">
+        <h2 class="heading-secondary" id="grid-title">EVERYTHING</h2>
+        <p class="mono-label" id="grid-count"></p>
+      </div>
+      <div class="video-grid" id="video-grid"><!-- injected --></div>
+    </section>
+  </main>
+
+  <footer class="foot foot-dark">
+    <p class="mono-label">S3 × CLOUDFRONT × LAMBDA — STREAMED, NEVER DOWNLOADED</p>
+  </footer>
+</section>
+
+<!-- ============================== PLAYER VIEW ============================= -->
+<section id="player-view" class="view" hidden>
+  <header class="topbar">
+    <div class="nav-pill">
+      <a class="nav-brand" href="#/" data-nav>DALAL<em>*</em></a>
+      <button class="text-link" id="back-btn">← BACK TO THE ARCHIVE</button>
+    </div>
+  </header>
+
+  <main class="player-main">
+    <p class="mono-label" id="player-folder"></p>
+    <h1 class="player-title" id="player-title"></h1>
+
+    <div class="player-shell reveal-fade">
+      <video id="player-video" controls playsinline preload="metadata"></video>
+    </div>
+
+    <div class="player-meta">
+      <span class="mint-tag" id="player-duration"></span>
+      <span class="mono-label" id="player-resolution"></span>
+      <span class="mono-label player-hint">HLS — STREAMED IN 6-SECOND CHUNKS</span>
+    </div>
+  </main>
+</section>
+
+<script src="/hls.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
