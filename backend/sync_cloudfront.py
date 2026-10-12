@@ -59,7 +59,7 @@ def main() -> None:
     # (creates tolerate defaults; updates demand them explicitly).
     for origin in origins:
         origin.setdefault("OriginPath", "")
-        origin.setdefault("OriginCustomHeaders", {"Quantity": 0, "Items": []})
+        origin.setdefault("CustomHeaders", {"Quantity": 0, "Items": []})
         origin.setdefault("ConnectionAttempts", 3)
         origin.setdefault("ConnectionTimeout", 10)
         origin.setdefault("OriginShield", {"Enabled": False})
