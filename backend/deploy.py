@@ -39,6 +39,7 @@ SSM_PARAM_NAME = f"/{PREFIX}/cloudfront-private-key"
 DOMAIN = json.loads((ROOT / "config.json").read_text())["cloudfront"]["domain"]
 KEY_PAIR_ID = json.loads((ROOT / "config.json").read_text())["cloudfront"]["key_pair_id"]
 PRIVATE_KEY_PATH = Path(json.loads((ROOT / "config.json").read_text())["cloudfront"]["private_key_path"])
+BUCKET = json.loads((ROOT / "config.json").read_text())["s3"]["bucket"]
 
 
 def main() -> None:
@@ -173,6 +174,21 @@ def ensure_role(session: boto3.session.Session) -> str:
                     "Action": "ssm:GetParameter",
                     "Resource": f"arn:aws:ssm:{REGION}:{account}:parameter{SSM_PARAM_NAME}",
                 },
+                {
+                    # Presigning itself needs no permission; these allow the
+                    # Lambda to create/list/abort multipart uploads so the
+                    # browser can stream files directly to S3.
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:ListBucketMultipartUploads",
+                        "s3:AbortMultipartUpload",
+                        "s3:ListMultipartUploadParts",
+                    ],
+                    "Resource": [
+                        f"arn:aws:s3:::{BUCKET}",
+                        f"arn:aws:s3:::{BUCKET}/uploads/*",
+                    ],
+                },
             ],
         }),
     )
@@ -239,6 +255,7 @@ def ensure_function(
             "KEY_PAIR_ID": KEY_PAIR_ID,
             "SSM_PARAM": SSM_PARAM_NAME,
             "TABLE_PREFIX": TABLE_PREFIX,
+            "BUCKET": BUCKET,
         }
     }
     try:
