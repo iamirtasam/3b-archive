@@ -10,6 +10,7 @@ credentials.json
 catalog.json
 backend/api_endpoint.json
 backend/build/
+backend/app/bin/
 
 # --- Python ---
 __pycache__/

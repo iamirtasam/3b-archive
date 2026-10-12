@@ -24,9 +24,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import shutil
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import ClientError
@@ -48,8 +53,9 @@ STREAM_TTL_SECONDS = 12 * 3600            # signed cookies live 12 hours
 PART_SIZE = 16 * 1024 * 1024              # 16 MB parts, same as the CLI pipeline
 PARTS_PER_PAGE = 100                      # presigned URLs per response
 PRESIGN_TTL = 3600                        # part URLs live 1 hour
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024 * 1024
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024   # /tmp (10 GB) must hold the HLS output
 ALLOWED_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"}
+FFMPEG = "/var/task/bin/ffmpeg"             # vendored static build (fetch_ffmpeg.py)
 PBKDF2_ITERATIONS = 200_000
 
 DUMMY_HASH = "0" * 64  # compared against when the user does not exist (timing)
@@ -60,6 +66,10 @@ _private_key_cache: str | None = None
 
 
 def lambda_handler(event, context):
+    # Background invocation fired by _upload_complete (Event source = async).
+    if event.get("action") == "package":
+        return _package_job(event)
+
     method = event.get("requestContext", {}).get("http", {}).get("method", "")
     path = event.get("rawPath", "")
     try:
@@ -80,7 +90,7 @@ def lambda_handler(event, context):
         if path.startswith("/api/uploads/") and method == "POST":
             last = event["rawPath"].rsplit("/", 1)[-1]
             if last == "complete":
-                return _upload_complete(event)
+                return _upload_complete(event, context)
             if last == "abort":
                 return _upload_abort(event)
             return _upload_parts(event)
@@ -177,9 +187,10 @@ def _stream_auth(event: dict) -> dict:
 # ------------------------------------------------------------ upload flow
 #
 # Design: zero extra infrastructure. S3 multipart state IS the database -
-# ListMultipartUploads shows what is staged, and completed uploads sit in
-# uploads/ until the local publisher promotes them. The Lambda only does
-# what only it can do: authenticate, validate, and presign.
+# ListMultipartUploads shows what is staged. On completion the route fires
+# an async self-invocation that runs the lossless ffmpeg remux inside
+# Lambda (streaming from S3, never storing the source) and publishes the
+# HLS output straight to videos/. No manual publish step, still free-tier.
 
 def _sanitize_filename(name: str) -> str:
     """Keep the basename, strip path tricks and characters S3 dislikes."""
@@ -283,9 +294,20 @@ def _upload_parts(event: dict) -> dict:
                                               min(to_part, PARTS_PER_PAGE * 20))})
 
 
-def _upload_complete(event: dict) -> dict:
+def _slug_for(key: str, filename: str) -> str:
+    """Deterministic video slug shared with scripts/publish.py: the sanitized
+    filename stem plus the first 8 hex chars of md5(key). The browser learns
+    the slug from the complete response and polls for it."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    base = re.sub(r"[^a-z0-9-_]+", "-", stem.lower()).strip("-") or "video"
+    digest = hashlib.md5(key.encode()).hexdigest()[:8]
+    return f"{base}-{digest}"
+
+
+def _upload_complete(event: dict, context) -> dict:
     """Finish the multipart session server-side from the part list the
-    browser collected - no upload bytes ever flow through Lambda."""
+    browser collected - no upload bytes ever flow through Lambda. Then kick
+    off the async packaging job so the video publishes itself."""
     username = _require_session(event)
     if username is None:
         return _json(401, {"error": "not logged in"})
@@ -314,7 +336,21 @@ def _upload_complete(event: dict) -> dict:
     except ClientError as err:
         code = err.response.get("Error", {}).get("Code", "UnknownError")
         return _json(409, {"error": f"S3 refused completion ({code})"})
-    return _json(200, {"ok": True, "key": key})
+
+    filename = key.rsplit("/", 1)[-1]
+    slug = _slug_for(key, filename)
+    title = filename.rsplit(".", 1)[0] if "." in filename else filename
+    try:
+        boto3.client("lambda").invoke(
+            FunctionName=context.invoked_function_arn,
+            InvocationType="Event",           # fire-and-forget background job
+            Payload=json.dumps(
+                {"action": "package", "key": key, "slug": slug, "title": title}),
+        )
+    except Exception as err:  # noqa: BLE001 - upload still counts as staged
+        print(f"WARN package invoke failed for {key}: {err!r}")
+
+    return _json(200, {"ok": True, "key": key, "slug": slug})
 
 
 def _upload_abort(event: dict) -> dict:
@@ -332,6 +368,147 @@ def _upload_abort(event: dict) -> dict:
         Bucket=BUCKET, Key=key, UploadId=upload_id
     )
     return _json(200, {"ok": True})
+
+
+# ------------------------------------------------------- background packager
+#
+# Runs as an Event-invoked copy of this same function. Reads the staged
+# upload from S3 as a stream (the source never touches /tmp), remuxes it to
+# fMP4 HLS with -c copy (lossless, fast - no encoding), grabs a poster
+# frame in the same pass, uploads the segments, writes the catalog item and
+# deletes the staged original. A 6 GB recording fits the whole flow inside
+# Lambda's 15-minute limit and the 10 GB /tmp (only the output lands there).
+
+def _package_job(event: dict) -> dict:
+    key = str(event.get("key", ""))
+    slug = str(event.get("slug", ""))
+    title = str(event.get("title", slug))
+    if not key or not slug or not BUCKET:
+        return {"ok": False, "reason": "bad invocation"}
+
+    work = Path("/tmp/hls") / slug
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    s3 = boto3.client("s3")
+
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=key)
+        cmd = [
+            FFMPEG, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+            # fMP4 HLS, stream copy only - same recipe as scripts/lib/hls.py
+            "-i", "pipe:0",
+            "-map", "0:v:0", "-map", "0:a:0?", "-sn",
+            "-c", "copy",
+            "-f", "hls",
+            "-hls_time", "6", "-hls_list_size", "0",
+            "-hls_playlist_type", "vod",
+            "-hls_flags", "independent_segments",
+            "-hls_segment_type", "fmp4",
+            "-hls_segment_filename", "seg_%05d.m4s",
+            "index.m3u8",
+            # second output: poster frame (decoded briefly, then done)
+            "-map", "0:v:0", "-ss", "3",
+            "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3",
+            "thumbnail.jpg",
+        ]
+        proc = subprocess.Popen(
+            cmd, cwd=str(work), stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        stderr_chunks: list[bytes] = []
+        reader = threading.Thread(
+            target=lambda: stderr_chunks.append(proc.stderr.read()))
+        reader.start()
+
+        def feed() -> None:
+            try:
+                while chunk := obj["Body"].read(1024 * 1024):
+                    proc.stdin.write(chunk)
+            finally:
+                proc.stdin.close()
+
+        feeder = threading.Thread(target=feed)
+        feeder.start()
+        feeder.join()
+        code = proc.wait()
+        reader.join()
+        stderr = (stderr_chunks[0].decode("utf-8", "replace")
+                  if stderr_chunks else "")
+
+        if code != 0:
+            raise RuntimeError(f"ffmpeg exit {code}: {stderr[-600:]}")
+
+        width, height, vcodec = _parse_streams(stderr)
+        if vcodec != "h264":
+            # Stream copy needs H.264. Leave the staged file for publish.py.
+            print(f"PACKAGE skip {key}: video codec {vcodec or 'unknown'}")
+            return {"ok": False, "reason": "codec", "codec": vcodec}
+
+        duration = _playlist_duration(work / "index.m3u8")
+        _upload_hls(work, slug)
+        _table(VIDEOS_TABLE).put_item(Item={
+            "slug": slug,
+            "title": title,
+            "folder": "Uploads",
+            "duration_seconds": int(duration),
+            "width": width or 0,
+            "height": height or 0,
+        })
+        s3.delete_object(Bucket=BUCKET, Key=key)   # staged original consumed
+        print(f"PACKAGE ok {slug}: {duration:.0f}s {width}x{height}")
+        return {"ok": True, "slug": slug}
+    except Exception as err:  # noqa: BLE001 - keep staged file on any failure
+        print(f"PACKAGE failed {key}: {err!r}")
+        return {"ok": False, "error": repr(err)}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _parse_streams(stderr: str) -> tuple[int, int, str]:
+    """Pull resolution + codec from ffmpeg's input report (no ffprobe)."""
+    vmatch = re.search(r"Stream #0:\d+.*?: Video: (\w+).*?, (\d{2,5})x(\d{2,5})",
+                       stderr)
+    codec = vmatch.group(1).lower() if vmatch else ""
+    width = int(vmatch.group(2)) if vmatch else 0
+    height = int(vmatch.group(3)) if vmatch else 0
+    return width, height, codec
+
+
+def _playlist_duration(playlist: Path) -> float:
+    """Sum the EXTINF tags - exact total runtime, free."""
+    total = 0.0
+    for line in playlist.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#EXTINF:"):
+            total += float(line.split(":", 1)[1].split(",", 1)[0])
+    return total
+
+
+_CONTENT_TYPES = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".m4s": "video/iso.segment",
+    ".mp4": "video/mp4",
+    ".jpg": "image/jpeg",
+}
+
+
+def _upload_hls(work: Path, slug: str) -> None:
+    """Push every generated file to videos/<slug>/ in parallel."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    files = [p for p in work.iterdir() if p.is_file()]
+    if not any(p.name == "index.m3u8" for p in files):
+        raise RuntimeError("ffmpeg produced no playlist")
+    s3 = boto3.client("s3")
+
+    def put(path: Path) -> None:
+        s3.put_object(
+            Bucket=BUCKET, Key=f"videos/{slug}/{path.name}",
+            Body=path.read_bytes(),
+            ContentType=_CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(put, files))
 
 
 def _presign_parts(key: str, upload_id: str,
