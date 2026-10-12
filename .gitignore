@@ -8,6 +8,8 @@ credentials.json
 # --- Local working data (catalogs, HLS intermediates, state DB) ---
 .data/
 catalog.json
+backend/api_endpoint.json
+backend/build/
 
 # --- Python ---
 __pycache__/
