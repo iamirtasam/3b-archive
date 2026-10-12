@@ -60,7 +60,7 @@ def main() -> None:
     print(f"stream-auth -> {status}")
     assert status == 200
 
-    cookies = headers["set-cookie"] + stream_headers["set-cookie"]
+    cookies = headers["set-cookie-list"] + stream_headers["set-cookie-list"]
     if videos["videos"]:
         slug = videos["videos"][0]["slug"]
         url = f"https://{CONFIG['cloudfront']['domain']}/videos/{slug}/index.m3u8"
@@ -79,12 +79,25 @@ def _req(method: str, url: str, payload: dict | None = None, cookies=None):
     if data:
         request.add_header("content-type", "application/json")
     if cookies:
-        request.add_header("cookie", "; ".join(cookies))
+        pairs = [
+            value.split(";")[0].strip()  # drop cookie attributes
+            for value in (cookies if isinstance(cookies, list) else [cookies])
+        ]
+        request.add_header("cookie", "; ".join(pairs))
     try:
         with urllib.request.urlopen(request, timeout=30) as resp:
-            return resp.status, resp.read(), dict(resp.headers)
+            return (resp.status, resp.read(),
+                    _headers_with_all_cookies(resp.headers))
     except urllib.error.HTTPError as err:
-        return err.code, err.read(), dict(err.headers)
+        return (err.code, err.read(),
+                _headers_with_all_cookies(err.headers))
+
+
+def _headers_with_all_cookies(message) -> dict:
+    """dict() collapses repeated Set-Cookie headers; keep every one of them."""
+    headers = dict(message)
+    headers["set-cookie-list"] = message.get_all("Set-Cookie") or []
+    return headers
 
 
 if __name__ == "__main__":
