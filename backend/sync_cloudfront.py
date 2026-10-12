@@ -55,20 +55,6 @@ def main() -> None:
 
     origins = config["Origins"].get("Items", [])
 
-    # Normalize fields the UpdateDistribution API requires on every origin
-    # (creates tolerate defaults; updates demand them explicitly).
-    for origin in origins:
-        origin.setdefault("OriginPath", "")
-        origin.setdefault("CustomHeaders", {"Quantity": 0, "Items": []})
-        origin.setdefault("ConnectionAttempts", 3)
-        origin.setdefault("ConnectionTimeout", 10)
-        origin.setdefault("OriginShield", {"Enabled": False})
-        if "S3OriginConfig" in origin:
-            origin["S3OriginConfig"].setdefault("OriginAccessIdentity", "")
-        if "CustomOriginConfig" in origin:
-            origin["CustomOriginConfig"].setdefault("OriginReadTimeout", 30)
-            origin["CustomOriginConfig"].setdefault("OriginKeepaliveTimeout", 5)
-
     if not any(o["Id"] == api_origin_id for o in origins):
         origins.append({
             "Id": api_origin_id,
@@ -85,6 +71,22 @@ def main() -> None:
     else:
         print(f"Origin exists: {api_origin_id}")
     config["Origins"] = {"Quantity": len(origins), "Items": origins}
+
+    # Normalize fields the UpdateDistribution API requires on every origin
+    # (creates tolerate defaults; updates demand them explicitly). Must run
+    # after any new origin is appended above.
+    for origin in origins:
+        origin.setdefault("OriginPath", "")
+        origin.setdefault("CustomHeaders", {"Quantity": 0, "Items": []})
+        origin.setdefault("ConnectionAttempts", 3)
+        origin.setdefault("ConnectionTimeout", 10)
+        origin.setdefault("OriginShield", {"Enabled": False})
+        if "S3OriginConfig" in origin:
+            origin["S3OriginConfig"].setdefault("OriginAccessIdentity", "")
+            origin["S3OriginConfig"].pop("OriginReadTimeout", None)  # S3 origins reject it
+        if "CustomOriginConfig" in origin:
+            origin["CustomOriginConfig"].setdefault("OriginReadTimeout", 30)
+            origin["CustomOriginConfig"].setdefault("OriginKeepaliveTimeout", 5)
 
     # 2 + 3. /api/* and /videos/* behaviors ----------------------------------
     default = config["DefaultCacheBehavior"]
