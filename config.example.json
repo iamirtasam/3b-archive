@@ -3,6 +3,11 @@
     "region": "ap-south-1",
     "profile": "default"
   },
+  "cloudfront": {
+    "domain": null,
+    "key_pair_id": null,
+    "private_key_path": "cloudfront-private-key.pem"
+  },
   "s3": {
     "bucket": "my-video-archive",
     "prefix": "videos"
