@@ -20,14 +20,15 @@ fi
 log "apt dependencies done"
 
 case "${VERSION_ID}" in
+  26.04) SWU="ubuntu2604"; SWF="ubuntu26.04" ;;
   24.04) SWU="ubuntu2404"; SWF="ubuntu24.04" ;;
   22.04) SWU="ubuntu2204"; SWF="ubuntu22.04" ;;
-  *) log "Unknown Ubuntu ${VERSION_ID} - assuming 24.04"; SWU="ubuntu2404"; SWF="ubuntu24.04" ;;
+  *) log "Unknown Ubuntu ${VERSION_ID} - assuming 26.04"; SWU="ubuntu2604"; SWF="ubuntu26.04" ;;
 esac
 
 if ! command -v swift >/dev/null 2>&1 && [ ! -x /opt/swift/usr/bin/swift ]; then
-  URL="https://download.swift.org/swift-6.4-release/${SWU}/swift-6.4-RELEASE/swift-6.4-RELEASE-${SWF}.tar.gz"
-  log "Downloading Swift 6.4 for ${SWF} (~800 MB)..."
+  URL="https://download.swift.org/swift-6.4.1-release/${SWU}/swift-6.4.1-RELEASE/swift-6.4.1-RELEASE-${SWF}.tar.gz"
+  log "Downloading Swift 6.4.1 for ${SWF} (~1.1 GB)..."
   curl -fL "$URL" -o /tmp/swift.tar.gz --retry 3
   mkdir -p /opt/swift
   tar -xzf /tmp/swift.tar.gz -C /opt/swift --strip-components=1
