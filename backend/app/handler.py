@@ -82,6 +82,14 @@ def lambda_handler(event, context):
             return _logout(event)
         if path == "/api/videos" and method == "GET":
             return _videos(event)
+        if path == "/api/videos/delete" and method == "POST":
+            return _video_delete(event)
+        if path == "/api/videos/rename" and method == "POST":
+            return _video_rename(event)
+        if path == "/api/videos/move" and method == "POST":
+            return _video_move(event)
+        if path == "/api/folders/rename" and method == "POST":
+            return _folder_rename(event)
         if path == "/api/stream-auth" and method == "GET":
             return _stream_auth(event)
         if path == "/api/uploads" and method == "GET":
@@ -183,6 +191,115 @@ def _stream_auth(event: dict) -> dict:
         return _json(401, {"error": "not logged in"})
     return _json(200, {"ok": True, "username": username},
                  cookies=_stream_cookies())
+
+
+# ------------------------------------------------------- archive management
+
+def _video_delete(event: dict) -> dict:
+    """Remove a video from the archive: S3 objects + catalog entry."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+    slug = str(_parse_body(event).get("slug", ""))
+    if not re.fullmatch(r"[a-z0-9-]+", slug):
+        return _json(400, {"error": "invalid slug"})
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    deleted = 0
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=f"videos/{slug}/"):
+        objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        if objects:
+            s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objects})
+            deleted += len(objects)
+    _table(VIDEOS_TABLE).delete_item(Key={"slug": slug})
+    print(f"ARCHIVE {username} deleted {slug} ({deleted} objects)")
+    return _json(200, {"ok": True, "slug": slug, "objects": deleted})
+
+
+def _video_rename(event: dict) -> dict:
+    """Change a video's display title."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+    body = _parse_body(event)
+    slug = str(body.get("slug", ""))
+    title = str(body.get("title", "")).strip()
+    if not re.fullmatch(r"[a-z0-9-]+", slug) or not title:
+        return _json(400, {"error": "slug and title are required"})
+    if len(title) > 120:
+        return _json(400, {"error": "title too long (max 120)"})
+    _table(VIDEOS_TABLE).update_item(
+        Key={"slug": slug},
+        UpdateExpression="SET #t = :t",
+        ExpressionAttributeNames={"#t": "title"},
+        ExpressionAttributeValues={":t": title},
+        ConditionExpression="attribute_exists(slug)",
+    )
+    return _json(200, {"ok": True, "slug": slug, "title": title})
+
+
+def _video_move(event: dict) -> dict:
+    """Move a video into a folder (creates the folder by naming it)."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+    body = _parse_body(event)
+    slug = str(body.get("slug", ""))
+    folder = str(body.get("folder", "")).strip()
+    if not re.fullmatch(r"[a-z0-9-]+", slug):
+        return _json(400, {"error": "invalid slug"})
+    if not folder or len(folder) > 60:
+        return _json(400, {"error": "folder name required (max 60)"})
+    _table(VIDEOS_TABLE).update_item(
+        Key={"slug": slug},
+        UpdateExpression="SET #f = :f",
+        ExpressionAttributeNames={"#f": "folder"},
+        ExpressionAttributeValues={":f": folder},
+        ConditionExpression="attribute_exists(slug)",
+    )
+    return _json(200, {"ok": True, "slug": slug, "folder": folder})
+
+
+def _folder_rename(event: dict) -> dict:
+    """Rename a folder: bulk-update every video in it."""
+    username = _require_session(event)
+    if username is None:
+        return _json(401, {"error": "not logged in"})
+    body = _parse_body(event)
+    old = str(body.get("from", "")).strip()
+    new = str(body.get("to", "")).strip()
+    if not old or not new or len(new) > 60:
+        return _json(400, {"error": "from and to are required (max 60)"})
+    if old == new:
+        return _json(200, {"ok": True, "moved": 0})
+
+    table = _table(VIDEOS_TABLE)
+    moved = 0
+    response = table.scan(
+        FilterExpression="#f = :old",
+        ExpressionAttributeNames={"#f": "folder"},
+        ExpressionAttributeValues={":old": old},
+    )
+    items = response.get("Items", [])
+    while "LastEvaluatedKey" in response:
+        response = table.scan(
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+            FilterExpression="#f = :old",
+            ExpressionAttributeNames={"#f": "folder"},
+            ExpressionAttributeValues={":old": old},
+        )
+        items.extend(response.get("Items", []))
+    for item in items:
+        table.update_item(
+            Key={"slug": item["slug"]},
+            UpdateExpression="SET #f = :new",
+            ExpressionAttributeNames={"#f": "folder"},
+            ExpressionAttributeValues={":new": new},
+        )
+        moved += 1
+    print(f"ARCHIVE {username} renamed folder {old!r} -> {new!r} ({moved} videos)")
+    return _json(200, {"ok": True, "moved": moved})
 
 
 # ------------------------------------------------------------ upload flow
