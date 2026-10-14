@@ -1,5 +1,8 @@
 # ============================================================
-#  Phase 6 setup — STEP 1 (run as Administrator)
+#  Phase 6 setup — STEP 1
+#  NOTE: If PowerShell says "running scripts is disabled", just
+#  paste this one command into an ADMIN PowerShell instead:
+#      wsl --install --no-launch
 #  Installs the WSL system component. Does NOT install Ubuntu
 #  yet, does NOT touch C: beyond ~100 MB, does NOT auto-reboot.
 # ============================================================

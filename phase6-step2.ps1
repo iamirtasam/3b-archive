@@ -2,6 +2,9 @@
 #  Phase 6 setup — STEP 2 (normal PowerShell, NO admin needed)
 #  Run this AFTER the reboot. Installs Ubuntu onto H: (not C:)
 #  and creates the default user.
+#  NOTE: If PowerShell says "running scripts is disabled", run:
+#      powershell -ExecutionPolicy Bypass -File "H:\Bots & Tools\s3 app streaming\phase6-step2.ps1"
+#  ...or paste the two wsl commands from below directly.
 # ============================================================
 
 Write-Host "==> Installing Ubuntu to H:\WSL\Ubuntu (virtual disk lands there, not C:)..." -ForegroundColor Cyan
