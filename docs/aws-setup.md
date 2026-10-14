@@ -1,101 +1,129 @@
-# Phase 1 — AWS setup (S3 + CloudFront)
+# AWS Setup — S3 + CloudFront + Lambda
 
-This walks you through the one-time cloud setup. Everything is clickable in the AWS Console, and the AWS CLI commands are given as the fast alternative. Total time: about 30 minutes.
+The complete one-time cloud setup behind 3B Archive. Everything is doable in
+the Console (click paths given) or the CLI (commands given). Total time:
+about 30 minutes. Total cost: $0 — this only creates free-tier resources.
+
+For the *why* behind each choice, see the [README's architecture
+section](../README.md#why-these-aws-decisions-the-cert-study-version).
 
 ## 0. Prerequisites
 
-- AWS CLI installed — `aws --version` should print 2.x
-- Run `aws configure` and enter:
-  - **AWS Access Key ID / Secret** — create one in the Console under *IAM → Users → your user → Security credentials → Create access key* (use the "Command line interface (CLI)" case)
-  - **Region** — `ap-south-1` (Mumbai) or your preferred region
+- AWS CLI 2.x — `aws --version`
+- `aws configure` with an IAM user access key (create under
+  *IAM → Users → Security credentials → Create access key*, CLI case)
+- Region: `ap-south-1` (Mumbai) used here — pick yours and stay consistent
 
-## 1. Create the bucket
+## 1. Private bucket
 
-> Pick a globally unique name — bucket names are shared across all of AWS. The examples use `my-video-archive`; replace it everywhere.
+> Bucket names are globally unique. Examples use `my-video-archive`.
 
-**Console:** S3 → *Create bucket* → name it → Region: *Asia Pacific (Mumbai)* → **Block Public Access: keep ALL boxes checked** (the bucket must be fully private — CloudFront gets access separately) → Enable *Bucket Versioning* off → Default encryption: SSE-S3 → Create.
+**Console:** S3 → *Create bucket* → Region → **Block Public Access: ALL four
+boxes checked** (CloudFront gets access via OAC separately, not by making
+the bucket public) → versioning off → SSE-S3 encryption → Create.
 
 **CLI:**
 
 ```bash
 aws s3 mb s3://my-video-archive --region ap-south-1
-aws s3api put-public-access-block \
-  --bucket my-video-archive \
+aws s3api put-public-access-block --bucket my-video-archive \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-## 2. Create a CloudFront key group (for signed playback)
+## 2. CloudFront signing key pair
 
-Signed URLs are what stop strangers from watching your private videos.
+This is what makes playback private: only requests carrying a signature made
+with your private key pass the edge.
 
 ```bash
-# Generate a key pair locally (one time)
 openssl genrsa -out cloudfront-private-key.pem 2048
 openssl rsa -pubout -in cloudfront-private-key.pem -out cloudfront-public-key.pem
 ```
 
-**Console:** CloudFront → *Key management → Public keys* → *Add public key* → paste the contents of `cloudfront-public-key.pem` (the `-----BEGIN PUBLIC KEY-----` lines included) → copy the generated **key pair ID**.
+**Console:** CloudFront → *Key management → Public keys → Add public key*
+→ paste `cloudfront-public-key.pem` (headers included) → note the generated
+**key pair ID**. Then *Key groups → Create key group* with that key → note
+the **key group ID**.
 
-Then *Key groups* → *Create key group* → add that public key → note the **key group ID**.
+> The private key never goes to AWS except (later) into SSM Parameter Store
+> so the Lambda can sign cookies. Never commit it — it's gitignored.
 
-> Keep `cloudfront-private-key.pem` safe and never commit it — it is already in `.gitignore`.
-
-## 3. Create the CloudFront distribution
+## 3. Distribution with Origin Access Control
 
 **Console:** CloudFront → *Create distribution*:
 
 | Setting | Value |
-| --- | --- |
-| Origin domain | your S3 bucket (the dropdown entry ending in `.s3.ap-south-1.amazonaws.com`) |
-| Origin access | **Origin access control settings** → create a new OAC (S3) |
-| Viewer protocol policy | **Redirect HTTP to HTTPS** |
-| Allowed HTTP methods | GET, HEAD |
-| Restrict viewer access | **Yes — trusted behaviors, trusted key groups = the one from step 2** |
+|---|---|
+| Origin | your bucket's `.s3.ap-south-1.amazonaws.com` endpoint |
+| Origin access | **Origin access control** (OAC, S3 type) |
+| Viewer protocol | Redirect HTTP → HTTPS |
+| Methods | GET, HEAD |
+| Restrict viewer access | **Yes — trusted key group from step 2** |
 | Cache policy | CachingOptimized |
-| Alternate domain name | none for now (you can add your own domain later) |
 
-When the distribution is created, the console offers a **"Copy policy"** button to update your S3 bucket policy — click it, then paste it into S3 → your bucket → *Permissions → Bucket policy*. This grants CloudFront's OAC read access while the bucket stays otherwise private.
+On creation, the console offers **"Copy policy"** — paste it into the
+bucket's policy so OAC can read. Note the distribution domain
+(`xxxx.cloudfront.net`).
 
-**CLI equivalent (summary):** create an origin access control, then the distribution with that OAC and the key group, then attach the generated bucket policy. Honestly, this one is easier in the console the first time.
+### The two extra behaviors (what makes this one domain)
 
-Note your **distribution domain name**: `d31uqelgcxwhug.cloudfront.net`.
+The deploy script (`backend/sync_cloudfront.py`) wires all three; the shape:
 
-## 4. Verify the privacy works
+| Behavior | Path | Origin | Cache policy | Viewer access |
+|---|---|---|---|---|
+| default | `/*` | S3 (site files) | CachingOptimized | public |
+| 2 | `/api/*` | API Gateway | CachingDisabled | public (auth in Lambda) |
+| 3 | `/videos/*` | S3 (videos) | CachingOptimized | **trusted key group** |
+
+Free-plan gotcha learned here: **custom cache policies are a paid feature**
+— this stack uses only AWS managed policies
+(`CachingOptimized`/`CachingDisabled` + `AllViewerExceptHostHeader` origin
+request policy so signed cookies reach the origin).
+
+## 4. Backend resources
+
+`python backend/deploy.py` creates everything idempotently:
+
+| Resource | Purpose | Notes |
+|---|---|---|
+| `svg_users` | accounts (PBKDF2 hash + salt) | |
+| `svg_sessions` | opaque session tokens | TTL attribute `expires`, DynamoDB auto-purges |
+| `svg_videos` | the catalog (slug → title/folder/duration/…) | |
+| SSM `/s3-streaming/cloudfront-private-key` | signing key at runtime | SecureString |
+| Lambda `s3-streaming-api` | the whole API + packager | python3.12, 1024 MB, 15 min, 10 GB scratch, vendored ffmpeg via `backend/fetch_ffmpeg.py` |
+| HTTP API | `$default` route → Lambda | free tier: 1 M requests/month |
+
+IAM for the function (least privilege): DynamoDB CRUD on `svg_*`, `ssm:GetParameter`, S3 read/write on `uploads/*` and `videos/*` + `ListBucket`, and `lambda:InvokeFunction` on itself (the async packager kick-off).
+
+## 5. Verify privacy actually works
 
 ```bash
-# S3 direct access: should be denied (403)
+# direct S3: denied
 aws s3 cp s3://my-video-archive/videos/ ./probe/ --no-sign-request 2>&1 | head -1
 
-# CloudFront without a signature: should be denied (403 MissingKey)
-curl -i "https://d1234abcd.cloudfront.net/videos/anything/index.m3u8" | head -3
+# through CloudFront without a signature: denied
+curl -i "https://xxxx.cloudfront.net/videos/anything/index.m3u8" | head -3
 ```
 
-Both should refuse access — that is exactly what we want. Only URLs signed with your private key will play. To watch a video manually, use the signer:
+Both must 403. Only signed-cookie requests (post-login) should play.
 
-```powershell
-python scripts/sign-url.py list          # slugs from the catalog
-python scripts/sign-url.py <slug>        # prints a 4-hour signed playback URL
-```
+## 6. Billing alarm — do not skip
 
-(Requires the `cloudfront` block in `config.json`: distribution domain, key pair ID, and the private key path. Phase 3's backend will generate these signatures automatically after login.)
+Console → *Billing → Budgets → Create budget → **Zero spend budget*** with
+your email. The entire architecture runs in the free tier; this emails you
+the instant anything would cost a cent.
 
-## 5. Set a billing alarm (2 minutes, do not skip)
-
-Console → *Billing → Budgets → Create budget → Zero spend budget*. With a zero-spend alarm you get an email the moment anything unexpected would cost money — nice peace of mind while you are learning the ropes.
-
-## Cost recap
+## Cost recap (steady state)
 
 | Item | Cost |
-| --- | --- |
-| S3 storage (320 GB) | ≈ $8 / month |
-| CloudFront egress | $0 up to 1 TB / month |
-| CloudFront key groups, OAC | Free |
-| This whole setup | One-time, $0 |
+|---|---|
+| Setup (all of the above) | one-time, $0 |
+| Key groups, OAC, behaviors | $0 |
+| Storage (320 GB S3) | ≈ $8/month — the only real cost |
 
 ## What's next
 
-- **Phase 2** — bulk-upload your library: `python pipeline.py` (see `scripts/README.md`)
-- **Phase 3** — a tiny backend (Lambda + DynamoDB) for login, folders, and signed URL generation
-- **Phase 4** — the website (folder browse → gallery → HLS player)
-- **Phase 5** — the iOS app via xtool (AVPlayer plays HLS natively)
+- `python backend/create_user.py <user> <pass>` — first account
+- Open the distribution domain, log in, drag videos into the uploader
+- `python backend/e2e_test.py` — verify the full stack
