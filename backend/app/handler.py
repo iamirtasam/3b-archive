@@ -655,10 +655,14 @@ def _package_job(event: dict) -> dict:
 
         # Remaining files: playlist (+ thumbnail); segments were streamed.
         _upload_hls(work, slug, skip=uploaded_files)
+        # Inherit the upload folder: uploads/<user>/<Folder>/<file> ->
+        # archive folder <Folder> (loose files land in "Uploads").
+        parts = key.split("/")
+        upload_folder = parts[2] if len(parts) >= 4 else "Uploads"
         _table(VIDEOS_TABLE).put_item(Item={
             "slug": slug,
             "title": title,
-            "folder": "Uploads",
+            "folder": upload_folder,
             "duration_seconds": int(duration),
             "width": width or 0,
             "height": height or 0,
