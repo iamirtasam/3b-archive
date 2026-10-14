@@ -6,8 +6,8 @@ import Foundation
 
 struct Video: Codable, Identifiable, Hashable {
     let slug: String
-    let title: String
-    let folder: String
+    var title: String
+    var folder: String
     let durationSeconds: Int
     let width: Int?
     let height: Int?
@@ -99,6 +99,36 @@ enum API {
             HTTPCookieStorage.shared.deleteCookie(c)
         }
     }
+
+    // MARK: archive management
+
+    static func deleteVideo(_ slug: String) async throws {
+        try await post(["slug": slug], to: "/api/videos/delete")
+    }
+
+    static func renameVideo(_ slug: String, to title: String) async throws {
+        try await post(["slug": slug, "title": title], to: "/api/videos/rename")
+    }
+
+    static func moveVideo(_ slug: String, to folder: String) async throws {
+        try await post(["slug": slug, "folder": folder], to: "/api/videos/move")
+    }
+
+    static func renameFolder(_ from: String, to: String) async throws {
+        try await post(["from": from, "to": to], to: "/api/folders/rename")
+    }
+
+    private static func post(_ body: [String: String], to path: String) async throws {
+        var req = URLRequest(url: URL(string: "\(base)\(path)")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            let msg = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+            throw APIError(message: (msg ?? "request failed").uppercased())
+        }
+    }
 }
 
 // Watch positions, keyed per video (localStorage's iOS counterpart).
@@ -108,5 +138,8 @@ enum Progress {
     }
     static func set(_ slug: String, _ seconds: Double) {
         UserDefaults.standard.set(seconds, forKey: "pos:\(slug)")
+    }
+    static func reset(_ slug: String) {
+        UserDefaults.standard.removeObject(forKey: "pos:\(slug)")
     }
 }

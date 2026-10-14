@@ -6,9 +6,16 @@ import SwiftUI
 
 struct ArchiveView: View {
     let username: String
-    let videos: [Video]
+    @Binding var videos: [Video]
     let onLogout: () -> Void
     @State private var folder: String? = nil   // nil = ALL
+    @State private var manageTarget: Video? = nil
+    @State private var renameText = ""
+    @State private var moveText = ""
+    @State private var folderRenameFrom: String? = nil
+    @State private var folderRenameText = ""
+    @State private var deleteConfirm: Video? = nil
+    @State private var busy = false
 
     private var folders: [String] {
         Array(Set(videos.map(\.folder))).sorted()
@@ -36,6 +43,42 @@ struct ArchiveView: View {
                 .padding(20)
             }
         }
+        .confirmationDialog(
+            "DELETE “\(deleteConfirm?.title ?? "")”?\nRemoved from S3 permanently.",
+            isPresented: Binding(get: { deleteConfirm != nil },
+                                 set: { if !$0 { deleteConfirm = nil } }),
+            titleVisibility: .visible) {
+            Button("DELETE", role: .destructive) {
+                if let v = deleteConfirm { Task { await doDelete(v) } }
+                deleteConfirm = nil
+            }
+            Button("CANCEL", role: .cancel) { deleteConfirm = nil }
+        }
+        .alert("RENAME VIDEO", isPresented: Binding(get: { manageTarget != nil && renameMode == .rename },
+                                                     set: { if !$0 { manageTarget = nil } })) {
+            TextField("TITLE", text: $renameText)
+            Button("SAVE") { if let v = manageTarget { Task { await doRename(v, renameText) } } ; manageTarget = nil }
+            Button("CANCEL", role: .cancel) { manageTarget = nil }
+        }
+        .alert("MOVE TO FOLDER", isPresented: Binding(get: { manageTarget != nil && renameMode == .move },
+                                                      set: { if !$0 { manageTarget = nil } })) {
+            TextField("FOLDER", text: $moveText)
+            Button("MOVE") { if let v = manageTarget { Task { await doMove(v, moveText) } } ; manageTarget = nil }
+            Button("CANCEL", role: .cancel) { manageTarget = nil }
+        } message: {
+            Text("EXISTING: \(folders.joined(separator: ", "))")
+        }
+        .alert("RENAME FOLDER", isPresented: Binding(get: { folderRenameFrom != nil },
+                                                     set: { if !$0 { folderRenameFrom = nil } })) {
+            TextField("NEW NAME", text: $folderRenameText)
+            Button("RENAME") { if let f = folderRenameFrom { Task { await doFolderRename(f, folderRenameText) } } ; folderRenameFrom = nil }
+            Button("CANCEL", role: .cancel) { folderRenameFrom = nil }
+        }
+    }
+
+    private enum ManageMode { case rename, move }
+    private var renameMode: ManageMode {
+        renameText.isEmpty && !moveText.isEmpty ? .move : .rename
     }
 
     private var header: some View {
@@ -79,6 +122,12 @@ struct ArchiveView: View {
                 .clipShape(Capsule())
                 .overlay(Capsule().stroke(active ? D.mint : D.ash, lineWidth: 1))
         }
+        .contextMenu {
+            Button("RENAME FOLDER") {
+                folderRenameFrom = label == "ALL" ? nil : label
+                folderRenameText = folderRenameFrom ?? ""
+            }
+        }
     }
 
     private var grid: some View {
@@ -87,9 +136,65 @@ struct ArchiveView: View {
             ForEach(shown) { v in
                 NavigationLink(value: v) {
                     VideoCard(v: v)
+                        .contextMenu {
+                            Button("RENAME") {
+                                manageTarget = v
+                                renameText = v.title
+                                moveText = ""
+                            }
+                            Button("MOVE TO FOLDER") {
+                                manageTarget = v
+                                moveText = v.folder
+                                renameText = ""
+                            }
+                            Button("DELETE", role: .destructive) { deleteConfirm = v }
+                        }
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+
+    // MARK: management actions
+
+    private func doDelete(_ v: Video) async {
+        busy = true
+        defer { busy = false }
+        try? await API.deleteVideo(v.slug)
+        videos.removeAll { $0.slug == v.slug }
+        Progress.reset(v.slug)
+    }
+
+    private func doRename(_ v: Video, _ title: String) async {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        busy = true
+        defer { busy = false }
+        try? await API.renameVideo(v.slug, to: t)
+        if let i = videos.firstIndex(where: { $0.slug == v.slug }) {
+            videos[i].title = t
+        }
+    }
+
+    private func doMove(_ v: Video, _ f: String) async {
+        let folder = f.trimmingCharacters(in: .whitespaces)
+        guard !folder.isEmpty else { return }
+        busy = true
+        defer { busy = false }
+        try? await API.moveVideo(v.slug, to: folder)
+        if let i = videos.firstIndex(where: { $0.slug == v.slug }) {
+            videos[i].folder = folder
+        }
+    }
+
+    private func doFolderRename(_ from: String, _ to: String) async {
+        let new = to.trimmingCharacters(in: .whitespaces)
+        guard !new.isEmpty, new != from else { return }
+        busy = true
+        defer { busy = false }
+        try? await API.renameFolder(from, to: new)
+        for i in videos.indices where videos[i].folder == from {
+            videos[i].folder = new
         }
     }
 }

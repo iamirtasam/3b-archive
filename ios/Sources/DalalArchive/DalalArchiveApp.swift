@@ -29,7 +29,7 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             if let username {
-                ArchiveView(username: username, videos: videos,
+                ArchiveView(username: username, videos: $videos,
                             onLogout: { Task { await logout() } })
                     .navigationDestination(for: Video.self) { v in
                         PlayerView(video: v)
