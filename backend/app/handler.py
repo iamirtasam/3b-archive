@@ -538,10 +538,12 @@ def _package_job(event: dict) -> dict:
             Params={"Bucket": BUCKET, "Key": key},
             ExpiresIn=4000,
         )
-        # Pass 1 - the remux. Stream copy only, single output: the same
-        # recipe as scripts/lib/hls.py. The source never touches /tmp, so
-        # file size is bounded by time, not scratch space.
-        remux = subprocess.run(
+        # Pass 1 - the remux. Stream copy only: the same recipe as
+        # scripts/lib/hls.py. ffmpeg reads the source straight from a
+        # presigned URL; a watcher thread uploads each finished segment and
+        # deletes it locally, so even a 40 GB source only ever occupies a
+        # few segments' worth of /tmp.
+        remux = subprocess.Popen(
             [
                 FFMPEG, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
                 "-i", url,
@@ -555,9 +557,50 @@ def _package_job(event: dict) -> dict:
                 "-hls_segment_filename", "seg_%05d.m4s",
                 "index.m3u8",
             ],
-            cwd=str(work), capture_output=True,
-            timeout=15 * 60 - 30)   # leave headroom for the uploads
-        stderr = remux.stderr.decode("utf-8", "replace")
+            cwd=str(work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        stderr_chunks: list[bytes] = []
+        err_reader = threading.Thread(
+            target=lambda: stderr_chunks.append(remux.stderr.read()))
+        err_reader.start()
+
+        uploaded_files: set[str] = set()
+
+        def watcher() -> None:
+            """Upload init + finished segments as they appear, then delete
+            the local copies to keep /tmp small. A segment is considered
+            finished once ffmpeg has opened the NEXT one (or exited)."""
+            s3w = boto3.client("s3")
+            while True:
+                segs = sorted(work.glob("seg_*.m4s"))
+                # everything except possibly the last is complete
+                for seg in segs[:-1]:
+                    if seg.name in uploaded_files:
+                        continue
+                    if seg.stat().st_size > 0:
+                        _put_hls_object(s3w, seg, slug)
+                        uploaded_files.add(seg.name)
+                        seg.unlink(missing_ok=True)
+                init = work / "init.mp4"
+                if init.exists() and "init.mp4" not in uploaded_files \
+                        and init.stat().st_size > 0:
+                    _put_hls_object(s3w, init, slug)
+                    uploaded_files.add("init.mp4")
+                    init.unlink(missing_ok=True)
+                if remux.poll() is not None:
+                    break
+                time.sleep(0.5)
+
+        pump = threading.Thread(target=watcher)
+        pump.start()
+        try:
+            remux.wait(timeout=15 * 60 - 30)
+        except subprocess.TimeoutExpired:
+            remux.kill()
+            raise RuntimeError("ffmpeg exceeded the time limit")
+        err_reader.join()
+        pump.join()
+        stderr = (stderr_chunks[0].decode("utf-8", "replace")
+                  if stderr_chunks else "")
 
         if remux.returncode != 0:
             raise RuntimeError(f"ffmpeg exit {remux.returncode}: {stderr[-600:]}")
@@ -572,14 +615,28 @@ def _package_job(event: dict) -> dict:
         if duration <= 0:
             raise RuntimeError("zero-length playlist - demux produced nothing")
 
-        # Pass 2 - poster frame. init.mp4 + the first segment concatenated
-        # is a valid seekable fMP4 file, so the source is not needed again.
-        segments = sorted(work.glob("seg_*.m4s"))
-        if not segments or not (work / "init.mp4").exists():
-            raise RuntimeError("ffmpeg produced no video segments")
+        # Poster frame from the first segment. init.mp4 may already have
+        # been streamed off; re-fetch it if needed (tiny).
+        init_path = work / "init.mp4"
+        if not init_path.exists() and "init.mp4" in uploaded_files:
+            s3.download_file(BUCKET, f"videos/{slug}/init.mp4", str(init_path))
+        segments = sorted(work.glob("seg_*.m4s")) or \
+            [p for p in work.iterdir() if p.name.startswith("seg_")]
+        if not segments:
+            # everything was streamed off; fetch the first segment back
+            playlist_text = (work / "index.m3u8").read_text(encoding="utf-8")
+            first_seg = next((l.strip() for l in playlist_text.splitlines()
+                              if l.strip().endswith(".m4s")), None)
+            if not first_seg:
+                raise RuntimeError("ffmpeg produced no video segments")
+            segments = [work / first_seg]
+            s3.download_file(BUCKET, f"videos/{slug}/{first_seg}",
+                             str(segments[0]))
+        if not init_path.exists():
+            raise RuntimeError("no init segment for poster frame")
         combined = work / "first.mp4"
         combined.write_bytes(
-            (work / "init.mp4").read_bytes() + segments[0].read_bytes())
+            init_path.read_bytes() + segments[0].read_bytes())
         thumb_ok = False
         for seek in ("0.5", "0"):
             cut = subprocess.run(
@@ -596,7 +653,8 @@ def _package_job(event: dict) -> dict:
             print(f"PACKAGE thumbnail failed for {slug} "
                   f"(publishing without one)")
 
-        _upload_hls(work, slug)
+        # Remaining files: playlist (+ thumbnail); segments were streamed.
+        _upload_hls(work, slug, skip=uploaded_files)
         _table(VIDEOS_TABLE).put_item(Item={
             "slug": slug,
             "title": title,
@@ -643,24 +701,27 @@ _CONTENT_TYPES = {
 }
 
 
-def _upload_hls(work: Path, slug: str) -> None:
-    """Push every generated file to videos/<slug>/ in parallel."""
+def _put_hls_object(s3, path: Path, slug: str) -> None:
+    """Upload one HLS artifact to videos/<slug>/."""
+    s3.put_object(
+        Bucket=BUCKET, Key=f"videos/{slug}/{path.name}",
+        Body=path.read_bytes(),
+        ContentType=_CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
+    )
+
+
+def _upload_hls(work: Path, slug: str, skip: set[str] | None = None) -> None:
+    """Push every generated file still on disk to videos/<slug>/."""
     from concurrent.futures import ThreadPoolExecutor
 
-    files = [p for p in work.iterdir() if p.is_file()]
+    skip = skip or set()
+    files = [p for p in work.iterdir() if p.is_file() and p.name not in skip]
     if not any(p.name == "index.m3u8" for p in files):
         raise RuntimeError("ffmpeg produced no playlist")
     s3 = boto3.client("s3")
 
-    def put(path: Path) -> None:
-        s3.put_object(
-            Bucket=BUCKET, Key=f"videos/{slug}/{path.name}",
-            Body=path.read_bytes(),
-            ContentType=_CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
-        )
-
     with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(put, files))
+        list(pool.map(lambda p: _put_hls_object(s3, p, slug), files))
 
 
 def _presign_parts(key: str, upload_id: str,
