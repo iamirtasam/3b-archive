@@ -41,7 +41,7 @@ struct ArchiveView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 0) {
-                Text("DALAL").font(D.display).tracking(-0.5)
+                Text("3B").font(D.display).tracking(-0.5)
                 Text("ARCHIVE").font(D.display).tracking(-0.5)
             }
             Spacer()

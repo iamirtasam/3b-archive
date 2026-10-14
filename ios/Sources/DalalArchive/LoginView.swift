@@ -80,7 +80,7 @@ struct LoginView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("DALAL")
+                        Text("3B")
                             .font(D.displayLG)
                             .tracking(-1)
                         Text("ARCHIVE")

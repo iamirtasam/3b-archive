@@ -1,2 +1,5 @@
 version: 1
 bundleID: tv.dalal.archive
+displayName: 3B Archive
+iconPath: Resources/AppIcon.png
+infoPath: Info.plist

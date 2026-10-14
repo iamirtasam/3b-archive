@@ -1,4 +1,4 @@
-/* DALAL ARCHIVE — front-of-house logic
+﻿/* 3B ARCHIVE â€” front-of-house logic
    One origin: the API, the site, and the videos share a domain,
    so session + CloudFront cookies ride on every fetch automatically. */
 (() => {
@@ -134,8 +134,8 @@
 
   function renderTicker() {
     const titles = state.videos.slice(0, 8)
-      .map((v) => v.title.toUpperCase()).join(" — ");
-    const text = `NOW STREAMING — ${titles} — NOW STREAMING — ${titles} — `;
+      .map((v) => v.title.toUpperCase()).join(" â€” ");
+    const text = `NOW STREAMING â€” ${titles} â€” NOW STREAMING â€” ${titles} â€” `;
     for (const id of ["login-ticker", "app-ticker"]) {
       const el = $(id);
       if (el) el.textContent = "";
@@ -171,10 +171,10 @@
     const video = $("player-video");
     delete video.dataset.retried;
     $("player-title").textContent = v.title.toUpperCase();
-    $("player-folder").textContent = `THE ARCHIVE — ${v.folder.toUpperCase()}`;
+    $("player-folder").textContent = `THE ARCHIVE â€” ${v.folder.toUpperCase()}`;
     $("player-duration").textContent = fmtMin(v.duration_seconds);
     $("player-resolution").textContent =
-      v.width && v.height ? `${v.width} × ${v.height}` : "HLS";
+      v.width && v.height ? `${v.width} Ã— ${v.height}` : "HLS";
 
     attachSource(video, v.playlist);
 
@@ -267,7 +267,7 @@
       </div>
       <div class="upload-bar"><div></div></div>
       <div class="upload-card-foot">
-        <span class="mono-label upload-status">STARTING…</span>
+        <span class="mono-label upload-status">STARTINGâ€¦</span>
         <span class="mono-label upload-speed"></span>
       </div>`;
     $("upload-queue").prepend(card);
@@ -362,7 +362,7 @@
       const eta = (file.size - uploadedBytes) / Math.max(speed, 1);
       setProgress(file, pct,
         `${completed.size}/${meta.partCount} PARTS`,
-        `${fmtBytes(speed)}/S — ${eta > 90 ? `${Math.round(eta / 60)} MIN LEFT` : `${Math.round(eta)} S LEFT`}`);
+        `${fmtBytes(speed)}/S â€” ${eta > 90 ? `${Math.round(eta / 60)} MIN LEFT` : `${Math.round(eta)} S LEFT`}`);
       lastTick = now; lastBytes = uploadedBytes;
     };
 
@@ -396,7 +396,7 @@
       }
     } catch (err) {
       // A dead multipart session (expired/aborted on S3) is unrecoverable in
-      // place — drop the stale session once and restart the file cleanly.
+      // place â€” drop the stale session once and restart the file cleanly.
       if (!isRetry && /not found|expired|aborted|NoSuchUpload/i.test(err.message || "")) {
         await api("/api/uploads/abort", {
           body: { key: meta.key, upload_id: meta.uploadId },
@@ -406,7 +406,7 @@
         return uploadFile(file, true);
       }
       setProgress(file, (uploadedBytes / file.size) * 100,
-        "PAUSED — REOPEN TO RESUME", err.message);
+        "PAUSED â€” REOPEN TO RESUME", err.message);
       return; // meta stays in localStorage: next visit resumes
     }
 
@@ -417,12 +417,12 @@
     });
     if (done.status !== 200) {
       // All bytes are on S3; a later reopen probes the parts and re-completes.
-      setProgress(file, 100, "FINISH FAILED — REOPEN TO RESUME",
+      setProgress(file, 100, "FINISH FAILED â€” REOPEN TO RESUME",
         (done.data.error || "").toUpperCase());
       return;
     }
     const secs = (Date.now() - startedAt) / 1000;
-    setProgress(file, 100, "UPLOADED — PACKAGING…",
+    setProgress(file, 100, "UPLOADED â€” PACKAGINGâ€¦",
       `${fmtBytes(file.size / Math.max(secs, 1))}/S AVG`);
     clearMeta(file);
     refreshStaged();
@@ -433,7 +433,7 @@
   // the catalog until the video shows up, then reload the archive live.
   async function waitForLive(file, slug) {
     if (!slug) {
-      setProgress(file, 100, "LIVE SOON — REFRESH HOME PAGE", "");
+      setProgress(file, 100, "LIVE SOON â€” REFRESH HOME PAGE", "");
       return;
     }
     for (let i = 0; i < 60; i++) {
@@ -441,13 +441,13 @@
       const r = await api("/api/videos").catch(() => ({ status: 0 }));
       if (r.status === 200 &&
           (r.data.videos || []).some((v) => v.slug === slug)) {
-        setProgress(file, 100, "LIVE ✓ — ON THE ARCHIVE",
+        setProgress(file, 100, "LIVE âœ“ â€” ON THE ARCHIVE",
           "CLICK HOME TO WATCH");
         if (typeof enterApp === "function") enterApp(r.data);
         return;
       }
     }
-    setProgress(file, 100, "STILL PACKAGING — CHECK HOME PAGE SOON",
+    setProgress(file, 100, "STILL PACKAGING â€” CHECK HOME PAGE SOON",
       "OVERSIZED OR ODD CODEC? RUN publish.py");
   }
 
@@ -464,7 +464,7 @@
       row.className = "staged-row";
       row.innerHTML = `
         <span class="video-title">${up.filename}</span>
-        <span class="mono-label">${up.owner === state.username ? "YOURS — AWAITING publish.py" : up.owner.toUpperCase()}</span>
+        <span class="mono-label">${up.owner === state.username ? "YOURS â€” AWAITING publish.py" : up.owner.toUpperCase()}</span>
         <button class="btn btn-ghost btn-sm staged-abort">DISCARD</button>`;
       row.querySelector(".staged-abort").onclick = async () => {
         await api("/api/uploads/abort", {
@@ -498,7 +498,7 @@
     err.hidden = true;
     const btn = $("login-submit");
     btn.disabled = true;
-    btn.textContent = "SIGNING IN…";
+    btn.textContent = "SIGNING INâ€¦";
     const { status, data } = await api("/api/login", {
       body: {
         username: $("login-username").value,
