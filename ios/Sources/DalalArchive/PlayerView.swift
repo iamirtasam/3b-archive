@@ -23,8 +23,35 @@ struct PlayerView: View {
             Color.black.ignoresSafeArea()
             stage.ignoresSafeArea()
         }
+        .overlay(alignment: .topLeading) { backButton }
         .task { await start() }
         .onDisappear { teardown() }
+    }
+
+    // Explicit close control — the nav bar is hidden for the black stage,
+    // and the edge-swipe gesture doesn't survive that.
+    private var backButton: some View {
+        Button {
+            teardown()
+            dismiss()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.left")
+                Text("ARCHIVE")
+            }
+            .font(D.mono)
+            .foregroundStyle(D.card)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(D.inverted.opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(D.card.opacity(0.4), lineWidth: 1)
+            )
+        }
+        .padding(.top, 6)
+        .padding(.leading, 12)
     }
 
     // Kept as separate subviews with explicit bindings — the `if let`
