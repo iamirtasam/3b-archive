@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Phase 6 — WSL-side toolchain install (run as root inside Ubuntu)
-# Installs: build deps, usbmuxd (iPhone USB), Swift 6.4, xtool AppImage.
+# WSL toolchain installer for the iOS app (run as root inside Ubuntu).
+# Installs: build deps, usbmuxd (iPhone USB), Swift 6.4.1, xtool AppImage.
 # Does NOT need the Xcode.xip - that comes later via `xtool setup`.
 set -euo pipefail
-log() { echo "[phase6] $*"; }
+log() { echo "[ios-setup] $*"; }
 
 . /etc/os-release
 log "Detected Ubuntu ${VERSION_ID}"
