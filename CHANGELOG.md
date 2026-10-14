@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here. Dates are when the phase landed.
 
+## 0.7.0 — iOS app, rebrand, archive management (2026-10-15)
+
+### Added
+- **Native iOS app** (SwiftUI + AVPlayer), built entirely from Windows via [xtool](https://xtool.sh) in WSL — no Mac, no paid developer account
+  - Cookie-authenticated playback: AVPlayer receives the CloudFront signed cookies via `AVURLAssetHTTPCookiesKey`; stream cookies self-refresh before each session
+  - Archive grid with folder chips, thumbnails, duration/quality badges, and watch-progress bars; resume positions saved per video
+  - AirPlay, Picture-in-Picture, and background audio via `AVPlayerViewController`
+  - Bundled Anton + JetBrains Mono fonts; the site's brutalist design tokens ported 1:1
+  - WSL↔iPhone bridge: usbipd corrupts large USB transfers (xtool#19), so Windows' Apple service owns the device and WSL reaches it over a TCP forward (`ios/deploy.sh`, `ios/check-device.sh`)
+- **Archive management** on site + iOS: delete (walks S3 prefix + catalog), rename, move to folder, folder rename (bulk) — 4 new authenticated Lambda routes, verified by `backend/test_manage.py` against live AWS
+- **Folder uploads**: CHOOSE FOLDER button + folder drag-drop (recursive via the entries API); each batch files under its source folder name; per-file cap raised 8 GB → 50 GB
+- **Streaming packager**: uploads each finished segment and deletes it locally during remux, so 30–40 GB sources package inside Lambda's flat scratch usage (watcher thread + resume-safe poster frame that re-fetches streamed-off segments)
+- README rebuilt as proper project documentation: story, architecture diagram, decision rationale (the cert-study table), repo map, ops cheatsheet, security model, limitations; `docs/aws-setup.md` rewritten with behavior/IAM tables
+
+### Changed
+- Rebrand to **3B Archive** across site, iOS (display name + generated app icon), and favicons
+- `scripts/publish.py` repositioned as the manual fallback with cloud-matching slugs
+- Repo cleaned: one-time setup scripts removed, iOS scripts relocated into `ios/`
+
+### Fixed
+- Multipart completion rejected by S3 when concurrent workers finished parts out of order — parts are now sorted server-side, with real error codes surfaced
+- Dead upload sessions in localStorage now self-heal (abort + restart fresh) instead of looping "upload not found"
+- `s3:ListBucket` grant added for prefix deletion (caught by the management e2e test)
+- Swift 6.4 compiler crash on `if let` shorthand in ViewBuilders; `VideoPlayer` unavailable in the Linux SDK → `AVPlayerViewController` wrapper
+- Site favicons actually wired (they were generated but never referenced)
+
 ## 0.6.0 — Phase 5.5: auto-packaging (2026-10-12)
 
 ### Added
