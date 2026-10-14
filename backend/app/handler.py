@@ -53,7 +53,10 @@ STREAM_TTL_SECONDS = 12 * 3600            # signed cookies live 12 hours
 PART_SIZE = 16 * 1024 * 1024              # 16 MB parts, same as the CLI pipeline
 PARTS_PER_PAGE = 100                      # presigned URLs per response
 PRESIGN_TTL = 3600                        # part URLs live 1 hour
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024   # /tmp (10 GB) must hold the HLS output
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # packager streams segments out
+                                            # as they are produced, so file
+                                            # size is bounded by the 15-min
+                                            # limit, not scratch space
 ALLOWED_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm"}
 FFMPEG = str(Path(__file__).resolve().parent / "bin" / "ffmpeg")
 # vendored static build (fetch_ffmpeg.py) - extracted next to handler.py
@@ -317,6 +320,13 @@ def _sanitize_filename(name: str) -> str:
     return cleaned.strip(". ") or "recording"
 
 
+def _sanitize_folder(name: str) -> str:
+    """Folder segment for uploads/<user>/<folder>/<file> - no slashes, no
+    traversal, no dots-only names."""
+    cleaned = "".join(c if c.isalnum() or c in " _-()" else "_" for c in name)
+    return cleaned.strip(". ")[:60] or "Uploads"
+
+
 def _validate_upload(filename: str, size: int) -> str | None:
     if not BUCKET:
         return "uploads are not configured (BUCKET env missing)"
@@ -343,12 +353,15 @@ def _uploads_list(event: dict) -> dict:
     paginator = s3.get_paginator("list_multipart_uploads")
     for page in paginator.paginate(Bucket=BUCKET, Prefix=f"{UPLOAD_PREFIX}/"):
         for up in page.get("Uploads", []):
-            # key format: uploads/<username>/<filename>
-            owner = up["Key"].split("/")[1] if up["Key"].count("/") >= 1 else "?"
+            # key format: uploads/<username>[/<folder>]/<filename>
+            parts = up["Key"].split("/")
+            owner = parts[1] if len(parts) >= 2 else "?"
+            folder = parts[2] if len(parts) >= 4 else ""
             uploads.append({
                 "filename": up["Key"].split("/")[-1],
                 "key": up["Key"],
                 "owner": owner,
+                "folder": folder,
                 "initiated": up["Initiated"].isoformat(),
                 "upload_id": up["UploadId"],
             })
@@ -363,12 +376,13 @@ def _upload_start(event: dict) -> dict:
     body = _parse_body(event)
     filename = _sanitize_filename(str(body.get("filename", "")))
     size = int(body.get("size_bytes", 0))
+    folder = _sanitize_folder(str(body.get("folder", "")))  # "" → Uploads
 
     if err := _validate_upload(filename, size):
         return _json(400, {"error": err})
 
     s3 = boto3.client("s3")
-    key = f"{UPLOAD_PREFIX}/{username}/{filename}"
+    key = f"{UPLOAD_PREFIX}/{username}/{folder}/{filename}"
     created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = created["UploadId"]
     return _json(200, {
@@ -381,6 +395,11 @@ def _upload_start(event: dict) -> dict:
     })
 
 
+def _own_key(username: str, key: str) -> bool:
+    """uploads/<username>/... - any depth below the user's prefix."""
+    return key.startswith(f"{UPLOAD_PREFIX}/{username}/")
+
+
 def _upload_parts(event: dict) -> dict:
     """Presign the next page of parts, and report already-uploaded parts so
     the browser can resume after a close/refresh."""
@@ -391,7 +410,7 @@ def _upload_parts(event: dict) -> dict:
     upload_id = event["rawPath"].rsplit("/", 1)[-1]
     body = _parse_body(event)
     key = str(body.get("key", ""))
-    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+    if not _own_key(username, key):
         return _json(403, {"error": "not your upload"})
 
     s3 = boto3.client("s3")
@@ -434,7 +453,7 @@ def _upload_complete(event: dict, context) -> dict:
     key = str(body.get("key", ""))
     upload_id = str(body.get("upload_id", ""))
     raw_parts = body.get("parts", [])
-    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+    if not _own_key(username, key):
         return _json(403, {"error": "not your upload"})
     if not upload_id or not raw_parts:
         return _json(400, {"error": "upload_id and parts are required"})
@@ -479,7 +498,7 @@ def _upload_abort(event: dict) -> dict:
     body = _parse_body(event)
     key = str(body.get("key", ""))
     upload_id = str(body.get("upload_id", ""))
-    if not key.startswith(f"{UPLOAD_PREFIX}/{username}/"):
+    if not _own_key(username, key):
         return _json(403, {"error": "not your upload"})
 
     boto3.client("s3").abort_multipart_upload(
