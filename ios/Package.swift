@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "DalalArchive",
-    platforms: [.iOS(name: .iOS, version: "17.0")],
+    platforms: [.iOS(.v17)],
     targets: [
         .executableTarget(
             name: "DalalArchive",
