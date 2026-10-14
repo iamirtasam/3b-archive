@@ -1,170 +1,264 @@
-# s3-app-streaming
+# S3 App Streaming
 
-A self-hosted, YouTube-style video streaming platform built on AWS — your own private video library, streamable from a website and an iOS app, for about the price of a coffee per month.
+<div align="center">
 
-## Why this exists
+<img src="site/favicon-180.png" width="72" alt="3B Archive logo" />
 
-I have roughly 320 GB of video recordings and wanted to watch them anywhere — in a browser or on my iPhone — without downloading files, without subscription fees, and without handing them to a third-party service. So this project does the obvious-but-fiddly thing: store the videos in Amazon S3, package them for proper streaming, and put a private, signed-URL-protected front end on top.
+**A private, YouTube-style streaming platform built from scratch on AWS.**
 
-The playback experience is the familiar one — videos start instantly, seeking is fast, and only the few seconds of video you are actually watching travel over the wire. Nothing is "downloaded" in any meaningful sense.
+*Your entire video library — streamed to a website and an iPhone, from a fully private S3 bucket, for ~$8/month.*
 
-## How it works
+[![CI](https://github.com/iamirtasam/s3-app-streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/iamirtasam/s3-app-streaming/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-informational)](LICENSE)
+[![AWS](https://img.shields.io/badge/cloud-AWS_S3_%2B_CloudFront_%2B_Lambda-232f3e?logo=amazonaws&logoColor=white)](https://aws.amazon.com)
+[![No servers](https://img.shields.io/badge/architecture-serverless-success)](README.md#architecture)
+[![Lossless](https://img.shields.io/badge/remux-ffmpeg_-c_copy-blueviolet)](README.md#the-video-pipeline)
+
+</div>
+
+---
+
+## The Story
+
+> **I ran out of disk space.**
+>
+> Around 320 GB of screen recordings with nowhere to go. The obvious options were all wrong: YouTube unlisted is a ToS gray zone with ads and zero control; a NAS is a machine I have to keep running; a paid streaming service is a subscription for content nobody else should see.
+>
+> So I built the thing I actually wanted: **my recordings live in a private S3 bucket, stream instantly to a website and my iPhone, and cost about the price of a coffee per month.** Uploading is drag-and-drop from the browser. The cloud packages everything automatically. My PC can stay off for a month and nothing breaks.
+>
+> **The full stack was written with AI assistance — the AWS architecture was designed by me.** Every choice here (trusted key groups over Lambda@Edge, signed cookies over per-URL signing, remuxing over transcoding, one distribution over many origins) was made deliberately, documented below, and would survive a solutions-architect review. That was the point: build something real, and understand every layer of it.
+
+## What It Does
+
+| | |
+|---|---|
+| **Stream everywhere** | Brutalist-editorial web app (hls.js) + native iOS app (SwiftUI + AVPlayer, built from Windows — no Mac) |
+| **Upload like YouTube Studio** | Drag a file — or an entire folder — onto the web uploader. 16 MB chunks stream straight to S3, resumable across reboots, up to 50 GB per file |
+| **Zero-touch publishing** | The moment an upload lands, a background Lambda runs ffmpeg **in the cloud**: lossless HLS remux, poster frame, catalog entry, live on the archive in minutes |
+| **Actually private** | CloudFront trusted-key-group signed cookies. The bucket blocks all public access; anonymous requests get a 403 before they ever reach S3 |
+| **Archive management** | Rename, re-folder, and hard-delete videos and folders — from the site or the phone. Deletion walks S3 and removes every segment |
+| **Synced progress** | Start a video on the website, resume on the phone |
+
+## Architecture
+
+One CloudFront distribution is the entire front door. The site, the API, and the videos share a single domain — which is what makes the privacy model and the playback path simple.
 
 ```
-Your PC (ffmpeg, free) ──▶ S3 bucket (private)
-                              │
-                        CloudFront CDN (signed URLs — only logged-in viewers)
-                              │
-              ┌───────────────┴───────────────┐
-        Website (hls.js)                iOS app (AVPlayer)
-              └───────────────┬───────────────┘
-                    Small API (Lambda + DynamoDB)
-                    login, folder catalog, signed playback URLs
+                               ┌─────────────────────────────┐
+                               │        VIEWERS              │
+                               │   browser · iPhone (AVPlayer)
+                               └──────────────┬──────────────┘
+                                              │  https (one domain)
+                                              ▼
+                              ┌───────────────────────────────┐
+                              │   CLOUDFRONT  (one distro)    │
+                              │                               │
+                              │   /        →  default behavior│
+                              │   /api/*   →  behavior 2      │
+                              │   /videos/*→  behavior 3      │
+                              │               ▲               │
+                              │               │ 403 unless    │
+                              │               │ signed cookie │
+                              │               │ (trusted key  │
+                              │               │  group)       │
+                              └───┬─────────┬─┴───────────────┘
+                    cache+static  │         │  dynamic
+                    CachingOptimized        │  CachingDisabled
+                    AllViewerExceptHost     │  + AllViewerExceptHost
+                              ▼             ▼
+              ┌──────────────────┐   ┌─────────────────────┐
+              │  S3 (private)    │   │  API Gateway (HTTP) │
+              │  site/*  videos/*│   └──────────┬──────────┘
+              │  uploads/*       │              ▼
+              │  ▲   ▲      ▲    │   ┌─────────────────────┐
+              └──┼───┼──────┼────┘   │  LAMBDA (python)    │
+   presigned     │   │      │        │  login · catalog    │
+   PUTs (browser)│   │      │        │  stream-auth ·      │
+   ──────────────┘   │      │        │  upload presigning  │
+   HLS segments      │      │        │  archive mgmt       │
+   (packager) ───────┘      │        └──────────┬──────────┘
+   staged originals         │                   │
+   (uploader) ──────────────┘        ┌──────────┴──────────┐
+                                     │  DYNAMODB           │
+                                     │  users · sessions   │
+                                     │  videos (catalog)   │
+                                     └─────────────────────┘
 ```
 
-The key idea is **HLS** (HTTP Live Streaming): each video is split into ~6-second segments. A player loads the tiny playlist file, then fetches segments on demand — which is precisely how YouTube-style playback works. iOS plays HLS natively with `AVPlayer`; browsers use `hls.js`.
+### The request lifecycle, concretely
 
-The videos are **remuxed, not re-encoded**. ffmpeg takes the existing H.264 stream and splits it into segments without touching the actual video data — completely lossless, effectively disk-speed, and completely free. (The paid alternative, AWS MediaConvert, would cost $180–800 for a library this size.)
+1. **Login** — `POST /api/login` → Lambda checks PBKDF2 (200k iterations, salted) against DynamoDB, sets an `svg_session` cookie, and immediately mints **CloudFront signed cookies** via `/api/stream-auth` using a private key pulled at runtime from **SSM Parameter Store**.
+2. **Browse** — `GET /api/videos` → Lambda scans the `svg_videos` table → the SPA renders folder chips and video cards.
+3. **Play** — the browser requests `/videos/<slug>/index.m3u8`. CloudFront validates the signed cookie **at the edge** (trusted key group) — Lambda is not in the playback path at all. hls.js then pulls segments on demand; only the seconds you're watching cross the network.
+4. **Upload** — the browser asks Lambda to create a multipart upload and gets **presigned part URLs**. 16 MB chunks PUT **directly to S3** from the browser — the API never touches video bytes.
+5. **Auto-publish** — the last presign-complete triggers an async self-invocation of the same Lambda, which streams the original from S3 through a vendored static ffmpeg and writes the catalog entry (detail below).
 
-## What's in this repo
+### Why these AWS decisions (the cert-study version)
+
+| Decision | Why | Alternative rejected |
+|---|---|---|
+| **CloudFront trusted key groups** for `/videos/*` | Signature validation happens **at the edge**, in every PoP, with zero compute cost | Lambda@Edge / CloudFront Functions — extra moving part, extra cost, cold starts in the hot path |
+| **Signed cookies, not signed URLs** | One signature covers the whole session — every playlist and segment request carries it automatically. No CORS, no token juggling, no per-segment expiry math | Signed URLs — 500 of them per video (one per segment), each needing refresh mid-playback |
+| **One distribution, three behaviors** | Site + API + video share a domain → cookies "just work", no CORS preflights, one DNS name, one TLS cert | Separate API domain — instant CORS tax, cookie SameSite headaches, second cache to tune |
+| **S3 multipart as upload state** | `ListMultipartUploads` **is** the staged-files database. Refresh-proof resume for free — S3 tracks every part forever | DynamoDB upload-tracking table — another thing to keep consistent with reality |
+| **fMP4 HLS segments** (`init.mp4` + `seg_*.m4s`) | Solves a real bug: MPEG-TS segments muddy AAC audio after the first segment boundary in hls.js. fMP4 is also what modern iOS expects | MPEG-TS — the legacy default |
+| **Presigned-URL ffmpeg input in Lambda** | ffmpeg's HTTP backend issues range requests, so recordings with a trailing `moov` atom seek correctly. A stdin pipe cannot seek and fails exactly there — learned the hard way | Downloading the whole file to `/tmp` — 10 GB ceiling |
+| **Streaming segment upload in the packager** | A watcher uploads each finished segment and deletes it locally, so even a 40 GB source only ever occupies a few segments of scratch space | Batch upload after remux — hard 10 GB `/tmp` ceiling |
+| **Remux, never transcode** | `-c copy` is bit-for-bit identical to the source, runs at disk speed, and is free. MediaConvert quoted $180–800 for this library | AWS Elemental MediaConvert — re-encodes everything, doubles storage, costs real money |
+
+### The video pipeline
 
 ```
-├── scripts/            Python pipeline: remux → thumbnails → upload to S3│   ├── prepare.py      Package recordings into HLS (resumable, lossless)
-│   ├── upload.py       Upload prepared videos to S3 (resumable, multipart)
-│   ├── pipeline.py     Both of the above in one command
-│   ├── publish.py      Manual fallback publisher (Lambda auto-packages first)
-│   └── lib/            Shared helpers (ffmpeg, S3, catalog, thumbnails)
-├── site/               The website — served by CloudFront at the same domain
-│   ├── index.html      Login, archive, and player views (single page app)
-│   ├── app.js          Routing, HLS playback, resume, cookie-based auth
-│   └── styles.css      Brutalist editorial design system
-├── backend/            Lambda API + deployment tooling
-│   ├── app/handler.py  Login, catalog, stream auth, upload presigning, auto-packaging
-│   ├── deploy.py       Idempotent backend provisioning (DynamoDB, SSM, Lambda, HTTP API)
-│   ├── sync_cloudfront.py  Wire site + API + videos into one distribution
-│   ├── deploy_site.py  Upload the website and invalidate the CDN cache
-│   ├── ensure_cors.py  Bucket CORS for direct browser uploads
-│   ├── fetch_ffmpeg.py Downloads the static ffmpeg vendored into the Lambda
-│   ├── create_user.py  Create a viewer account
-│   ├── seed_catalog.py Sync the local catalog into DynamoDB
-│   └── e2e_test.py     End-to-end verification of the whole stack
-├── docs/
-│   └── aws-setup.md    One-time cloud setup: bucket, CloudFront, signing keys
-└── config.example.json Copy to config.json and edit
+ recording.mp4 (H.264/AAC, any size up to 50 GB)
+        │
+        ▼
+ ┌─────────────────────────────────────────────────────────┐
+ │ LAMBDA PACKAGER (async, 15 min ceiling, 10 GB scratch)  │
+ │                                                         │
+ │  presigned S3 URL ──▶ ffmpeg -c copy                    │
+ │        │                    │                           │
+ │        │              index.m3u8 + init.mp4 + seg_*.m4s│
+ │        │                    │                           │
+ │        │              watcher: upload + delete locally   │
+ │        │                    │                           │
+ │  poster frame ◀── init.mp4 + first segment (seekable)   │
+ │        │                    │                           │
+ │        └──────▶ DynamoDB catalog entry ──▶ delete source│
+ └─────────────────────────────────────────────────────────┘
+        │
+        ▼
+ /videos/<slug>/index.m3u8  —  live on the archive in minutes
 ```
 
-## Quick start
+Remux vs transcode: `-c copy` never re-encodes a pixel. A 6 GB recording packages in a few minutes, inside Lambda's free tier, and the output is visually identical to the source.
 
-### 1. Install the tools
+## Repo Map
+
+```
+├── site/                  The web app (served by CloudFront)
+│   ├── index.html         SPA shell: login · archive · player · uploader
+│   ├── app.js             Routing, HLS playback, resume, uploads, management
+│   ├── styles.css         Brutalist editorial design system
+│   └── hls.min.js         Vendored hls.js — no CDN dependency
+├── backend/
+│   ├── app/handler.py     The entire API: auth, catalog, upload presigning,
+│   │                      archive management, and the ffmpeg packager
+│   ├── deploy.py          Idempotent provisioning: tables, SSM, Lambda, HTTP API, IAM
+│   ├── sync_cloudfront.py Distribution wiring: 3 origins → 3 behaviors
+│   ├── deploy_site.py     Site upload + CDN invalidation
+│   ├── ensure_cors.py     Bucket CORS for browser PUTs
+│   ├── fetch_ffmpeg.py    Downloads the static ffmpeg vendored into Lambda
+│   ├── create_user.py     Create a viewer account (PBKDF2, salted)
+│   ├── list_users.py      List / remove accounts
+│   ├── seed_catalog.py    Sync local catalog → DynamoDB
+│   ├── test_manage.py     E2E test of the archive management API
+│   └── e2e_test.py        Whole-stack verification
+├── ios/                   Native iOS app — SwiftUI + AVPlayer, no Mac needed
+│   ├── Sources/           Login · archive grid · cookie-authed player
+│   ├── deploy.sh          One command: build, sign, install (WSL → iPhone)
+│   ├── setup-wsl-toolchain.sh   Swift 6.4 + xtool installer
+│   └── check-device.sh    iPhone bridge diagnostics
+├── scripts/               Local pipeline (fallback for >50 GB / offline work)
+│   ├── pipeline.py        Remux + upload in one resumable command
+│   ├── publish.py         Manual publisher — slug-compatible with the cloud
+│   ├── sign-url.py        Manual signed-URL generator (VLC etc.)
+│   └── lib/               ffmpeg · S3 · catalog · thumbnail helpers
+├── site-design/           The design system: tokens, type scale, motion spec
+├── docs/aws-setup.md      The full one-time AWS setup walkthrough
+└── config.example.json    Copy → config.json, fill in your values
+```
+
+## Getting Started
+
+### Prerequisites
+
+- AWS CLI (`aws configure` done, admin-ish credentials for setup)
+- Python 3.12+, `pip install -r scripts/requirements.txt`
+- ffmpeg on PATH (`winget install Gyan.FFmpeg`)
+
+### 1. One-time AWS setup (~30 min, $0)
+
+Follow **[docs/aws-setup.md](docs/aws-setup.md)**: private S3 bucket → CloudFront key pair + trusted key group → distribution with OAC → zero-spend billing alarm. Every step has Console *and* CLI paths.
+
+### 2. Configure and deploy
 
 ```powershell
-winget install Gyan.FFmpeg
-winget install Amazon.AWSCLI
-pip install -r scripts/requirements.txt
-aws configure   # access key + secret + region (ap-south-1)
-```
-
-### 2. One-time AWS setup
-
-Follow [docs/aws-setup.md](docs/aws-setup.md) — create a private S3 bucket and a CloudFront distribution with signed access. About 30 minutes, $0.
-
-### 3. Configure
-
-```powershell
-copy config.example.json config.json
-# edit: source_dir (where your recordings live), bucket name, region
-```
-
-### 4. Push a batch of videos
-
-```powershell
-python scripts/pipeline.py --source "H:\Recordings\Batch 3"
-```
-
-Interrupted? Run it again — it resumes exactly where it stopped. Your PC is only needed for these few minutes or hours of packaging and uploading; streaming afterwards is entirely on AWS.
-
-## How the site works
-
-One CloudFront distribution serves everything from a single domain — `https://d31uqelgcxwhug.cloudfront.net`:
-
-| Path | Served by | Access |
-| --- | --- | --- |
-| `/` | Site files in S3 (`index.html`, `app.js`, …) | Public — it's just the app shell, no data |
-| `/api/*` | API Gateway → Lambda (login, catalog, stream auth, upload presigning) | Public endpoints, authenticated logic |
-| `/videos/*` | The HLS videos in S3 | Signed cookies required — 403 for everyone else |
-| `uploads/*` (in S3) | Staged originals waiting for (auto-)packaging | Presigned part URLs only |
-
-Because the site, the API, and the videos share one domain, logging in sets CloudFront signed cookies once and the browser attaches them to every playlist, segment, and API call automatically. No CORS, no per-URL signatures, no juggling tokens. Expired playback cookies renew themselves mid-stream via `/api/stream-auth`.
-
-### Uploading from the browser (Phase 5)
-
-Click **UPLOAD** in the site's nav bar (or drag recordings onto the upload page):
-
-1. The browser picks up your files and asks the Lambda for presigned part URLs
-2. It streams 16 MB chunks **directly to S3** — with a live progress bar, speed, and ETA; nothing flows through the API
-3. Close the tab mid-upload? Reopen the page and re-pick the file — it resumes from wherever S3 already has bytes
-4. The moment a file finishes, a background Lambda job packages it **automatically** — the video appears on the archive a couple of minutes later, and the upload card flips to `LIVE ✓`
-
-Nothing else to run. The packaging job streams the original from S3 through a vendored static ffmpeg (presigned-URL input, so recordings with a trailing moov atom seek fine), remuxes to fMP4 HLS losslessly with `-c copy`, cuts a poster frame, writes the catalog entry, and consumes the staged original — all inside Lambda's free tier. The browser upload cap is 8 GB per file so every job fits Lambda's 15-minute ceiling.
-
-Two edge cases fall back to the manual path (`scripts/publish.py`, unchanged and slug-compatible):
-
-- files **over 8 GB** — upload those from `D:\Recordings` with `scripts/pipeline.py` as before
-- sources whose codecs can't be stream-copied (the job publishes only true H.264/AAC remuxes; anything else stays staged)
-
-### Adding new users
-
-```powershell
+copy config.example.json config.json    # bucket name, region, CloudFront key info
+python backend\deploy.py                # DynamoDB, SSM, Lambda, HTTP API, IAM
+python backend\sync_cloudfront.py       # wire the three behaviors
+python backend\ensure_cors.py           # browser PUT permissions
+python backend\deploy_site.py           # ship the website
 python backend\create_user.py <username> <password>
 ```
 
-### Deploying the site after changes
+### 3. Use it
 
-```powershell
-python backend\deploy_site.py
-```
+- **Website** — open the distribution domain, log in, drag videos onto the uploader. They publish themselves.
+- **iPhone** — `bash ios/deploy.sh` from WSL with the phone plugged in. The toolchain setup is [ios/setup-wsl-toolchain.sh](ios/setup-wsl-toolchain.sh) (one-time; needs an Xcode.xip download and an Apple ID).
+- **Huge batches** — `python scripts/pipeline.py --source "D:\Recordings\Batch"` from the PC, resumable.
 
-### Backend / infrastructure updates
+## Operations Cheatsheet
 
-```powershell
-python backend\deploy.py           # Lambda code, env, IAM
-python backend\sync_cloudfront.py  # distribution behaviors (rarely changes)
-python backend\ensure_cors.py      # bucket CORS for browser uploads (idempotent)
-```
+| Task | Command |
+|---|---|
+| Create a viewer | `python backend\create_user.py <user> <pass>` |
+| List / delete viewers | `python backend\list_users.py` / `--delete <user>` |
+| Update backend code | `python backend\deploy.py` |
+| Update the website | `python backend\deploy_site.py` |
+| Verify the whole stack | `python backend\e2e_test.py` |
+| Test archive management | `python backend\test_manage.py` |
+| Watch packager logs | `aws logs tail /aws/lambda/s3-streaming-api` |
+| Manual signed URL (VLC) | `python scripts\sign-url.py <slug>` |
 
-## Costs
+## Cost Breakdown
 
-| Item | Cost |
-| --- | --- |
-| S3 storage (320 GB) | ≈ $8 / month |
-| CloudFront egress | $0 — first 1 TB/month is free |
-| ffmpeg remuxing | $0 (runs on your PC, lossless) |
-| Backend (Lambda + DynamoDB) | ≈ $0 (free tier) |
-| **Total** | **≈ $8 / month** |
+| Item | Monthly | Notes |
+|---|---|---|
+| S3 Standard (320 GB, ap-south-1) | ~$8 | The only real cost |
+| CloudFront egress | $0 | First 1 TB/month free tier |
+| Lambda + API Gateway | ~$0 | Well inside free tier (packager ≈ 300 GB-s per video) |
+| DynamoDB | $0 | On-demand, a few hundred reads/day |
+| SSM Parameter Store | $0 | One SecureString |
+| **Total** | **≈ $8/month** | Cheaper than one month of any streaming service |
 
-## Privacy model
+## Security Model
 
-The S3 bucket blocks all public access. The only way in is through CloudFront, and every `/videos/*` request must carry cookies signed with a private key that lives in SSM Parameter Store — viewers get them only after logging in. So you plus the people you invite can watch, and everyone else gets a 403. See `docs/aws-setup.md` for the exact setup.
-
-## Roadmap
-
-- [x] **Phase 1** — AWS setup + local remux/upload pipeline (this repo)
-- [x] **Phase 2** — first videos migrated (Valorant batch, 3.7 GB, 327 segments)
-- [x] **Phase 3** — backend: login, folder catalog, signed cookie issuing (Lambda + API Gateway + DynamoDB)
-- [x] **Phase 4** — website: brutalist login → folder browse → gallery → HLS player with resume
-- [x] **Phase 5** — web uploader: drag-and-drop or file picker, direct-to-S3 multipart with progress, speed, ETA, and refresh-proof resume; auto-packaging in Lambda publishes uploads by itself (`publish.py` stays as the manual fallback)
-- [ ] **Phase 6** — iOS app via [xtool](https://xtool.sh) (SwiftUI + AVPlayer, built from Windows)
-- [ ] **Phase 7** — region migration script (ap-south-1 → eu-central-1) and niceties
+- **S3**: all four Block Public Access settings on. No bucket policy entries for the public. Direct S3 URLs 403.
+- **Playback**: `/videos/*` requires CloudFront signed cookies minted by Lambda after authentication. Signature validation happens at the edge via trusted key group; the signing private key lives in SSM Parameter Store, fetched at runtime, never on disk in the repo.
+- **Auth**: PBKDF2-SHA256, 200,000 iterations, per-user random salt. Sessions are opaque 256-bit tokens, stored hashed, TTL'd in DynamoDB. Login responses are timing-equalized against unknown usernames.
+- **Uploads**: presigned part URLs scoped to `uploads/<username>/...` — one user cannot write into another's prefix. Multipart abort requires the same ownership check.
+- **Management APIs**: every delete/rename/move validates the session and the key path server-side.
 
 ## FAQ
 
-**Do I need my PC on 24/7?** No — only when adding new videos. Once on S3, playback runs entirely on AWS, even with your PC off for a month.
+**Why not YouTube unlisted?** ToS risk, ads, zero API for a private client, and your content trains their recommendations. Also — building it is the fun part.
 
-**Why not just play the MP4s directly from S3?** That works with `faststart`-optimized files, but HLS gives instant seeking, chunked playback, and native iOS support — the difference is very noticeable on real connections.
+**Why not Plex/Jellyfin?** They're great, but they want a machine running 24/7. This architecture has zero servers — turn the PC off for a month and playback still works. (Jellyfin + S3 storage doesn't really work; Plex's cloud sync was discontinued.)
 
-**Why not MediaConvert?** It re-encodes in the cloud (nice, but $180–800 for this library, plus doubled storage). Remuxing is free and lossless. If adaptive bitrate (auto quality switching) ever matters, MediaConvert can be added for new uploads only.
+**Why HLS instead of progressive MP4?** Instant seeking, chunked delivery (only watched seconds travel), native iOS support, and it's the same delivery model YouTube uses. `faststart` MP4s work but seek noticeably slower on real connections.
 
-**Why not just use YouTube unlisted?** Terms of service, privacy, no API for a private app, ads, and zero control. Also — building it is the fun part.
+**Why build an iOS app from Windows?** [xtool](https://xtool.sh) compiles Swift with a Linux toolchain and signs with Apple's own services — no Mac, no paid developer account. The interesting bit was the WSL↔iPhone USB bridge (usbipd corrupts large USB transfers; the fix is a TCP forward of Windows' Apple socket — see `ios/check-device.sh`).
+
+**What happens to a 40 GB upload?** Same as a 2 GB one: chunks stream to S3, the packager streams segments out as ffmpeg produces them. Scratch space usage stays flat regardless of source size; the only limit is the 15-minute Lambda ceiling, which a 50 GB remux fits inside comfortably.
+
+## Known Limitations
+
+- One video quality (the source's) — no ABR ladder. MediaConvert can be added per-upload later if needed.
+- Playback position syncs per-device, not across devices.
+- Free Apple dev accounts require re-signing the iOS app every 7 days (`bash ios/deploy.sh`).
+- The packager publishes H.264/AAC remuxes only; exotic codecs fall back to the local pipeline.
+
+## Roadmap
+
+- [x] **Phase 1** — AWS setup + local remux/upload pipeline
+- [x] **Phase 2** — first videos migrated (Valorant batch, 3.7 GB, 327 segments)
+- [x] **Phase 3** — backend: login, folder catalog, signed cookie issuing
+- [x] **Phase 4** — website: brutalist login → folder browse → gallery → HLS player with resume
+- [x] **Phase 5** — web uploader + zero-touch cloud packaging
+- [x] **Phase 6** — iOS app via xtool (SwiftUI + AVPlayer, built from Windows)
+- [x] **Archive management** — delete / rename / re-folder, site + iOS
+- [x] **Folder uploads** — pick a whole folder; 50 GB per file
+- [ ] **Nice-to-haves** — cross-device progress sync, ABR ladder, re-sign reminder
 
 ## License
 
