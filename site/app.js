@@ -378,7 +378,7 @@
     return `${(n / 1024).toFixed(0)} KB`;
   }
 
-  function uploadCard(file) {
+  function uploadCard(file, folder = "") {
     const old = document.getElementById(`up-${CSS.escape(file.name)}-${file.size}`);
     if (old) old.remove();
     const card = document.createElement("div");
@@ -387,7 +387,7 @@
     card.innerHTML = `
       <div class="upload-card-head">
         <span class="video-title">${file.name}</span>
-        <span class="mono-label">${fmtBytes(file.size)}</span>
+        <span class="mono-label">${folder ? `${folder.toUpperCase()} · ` : ""}${fmtBytes(file.size)}</span>
       </div>
       <div class="upload-bar"><div></div></div>
       <div class="upload-card-foot">
@@ -438,15 +438,16 @@
   const PART_CONCURRENCY = 3;
   const PART_RETRIES = 3;
 
-  async function uploadFile(file, isRetry = false) {
-    uploadCard(file);
+  async function uploadFile(file, opts = {}, isRetry = false) {
+    uploadCard(file, opts.folder);
     const startedAt = Date.now();
 
     // Resume: reuse the multipart session saved before a close/refresh.
     let meta = loadMeta(file);
     if (!meta) {
       const r = await api("/api/uploads", {
-        body: { filename: file.name, size_bytes: file.size },
+        body: { filename: file.name, size_bytes: file.size,
+                folder: opts.folder || "" },
       });
       if (r.status !== 200) {
         setProgress(file, 0, (r.data.error || "REJECTED").toUpperCase(), "");
@@ -527,7 +528,7 @@
         }).catch(() => {});
         clearMeta(file);
         presignCache.clear();
-        return uploadFile(file, true);
+        return uploadFile(file, opts, true);
       }
       setProgress(file, (uploadedBytes / file.size) * 100,
         "PAUSED â€” REOPEN TO RESUME", err.message);
@@ -588,7 +589,7 @@
       row.className = "staged-row";
       row.innerHTML = `
         <span class="video-title">${up.filename}</span>
-        <span class="mono-label">${up.owner === state.username ? "YOURS â€” AWAITING publish.py" : up.owner.toUpperCase()}</span>
+        <span class="mono-label">${up.folder ? `${up.folder.toUpperCase()} · ` : ""}${up.owner === state.username ? "YOURS â€” PACKAGING SOON" : up.owner.toUpperCase()}</span>
         <button class="btn btn-ghost btn-sm staged-abort">DISCARD</button>`;
       row.querySelector(".staged-abort").onclick = async () => {
         await api("/api/uploads/abort", {
@@ -661,13 +662,34 @@
   $("nav-upload-btn").addEventListener("click", () => { location.hash = "#/upload"; });
   $("upload-back-btn").addEventListener("click", () => { location.hash = "#/"; });
   $("pick-btn").addEventListener("click", () => $("file-input").click());
+  $("pick-folder-btn").addEventListener("click", () => $("folder-input").click());
   $("file-input").addEventListener("change", (e) => {
-    for (const file of e.target.files) uploadFile(file);
+    for (const file of e.target.files) uploadFile(file, { folder: "" });
     e.target.value = ""; // allow re-picking the same file
+  });
+  $("folder-input").addEventListener("change", (e) => {
+    enqueueFolderPicked(e.target.files);
+    e.target.value = "";
   });
   $("refresh-staged-btn").addEventListener("click", refreshStaged);
 
-  // Drag a recording anywhere onto the upload page to start uploading it.
+  // Group picked/dropped files by their top-level folder and upload each
+  // batch with that folder name (webkitRelativePath: "Folder/file.mp4").
+  function enqueueFolderPicked(fileList) {
+    const groups = new Map(); // folder -> files[]
+    for (const file of fileList) {
+      const rel = file.webkitRelativePath || "";
+      const top = rel.includes("/") ? rel.split("/")[0] : "";
+      if (!/\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(file.name)) continue;
+      if (!groups.has(top)) groups.set(top, []);
+      groups.get(top).push(file);
+    }
+    for (const [folder, files] of groups) {
+      for (const file of files) uploadFile(file, { folder });
+    }
+  }
+
+  // Drag a recording — or a whole folder — onto the upload page.
   const dropZone = document.querySelector(".upload-main");
   dropZone.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -677,7 +699,49 @@
   dropZone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropZone.classList.remove("dragging");
-    for (const file of e.dataTransfer.files) uploadFile(file);
+    const items = [...(e.dataTransfer.items || [])];
+    if (items.some((it) => it.kind === "file" && it.webkitGetAsEntry()?.isDirectory)) {
+      // Folder drop: walk the tree via the entries API.
+      const walker = [];
+      for (const it of items) {
+        const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+        if (entry) walker.push(entry);
+      }
+      const batches = new Map(); // topFolder -> {path->Promise<File>}
+      const files = new Map();   // path -> File (flat entries)
+      const readEntry = (entry, base) => new Promise((resolve) => {
+        if (entry.isFile) {
+          entry.file((f) => { files.set(base + f.name, f); resolve(); }, resolve);
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const all = [];
+          const readBatch = () => reader.readEntries((batch) => {
+            if (!batch.length) {
+              Promise.all(all).then(resolve);
+              return;
+            }
+            for (const child of batch) {
+              all.push(readEntry(child, base ? `${base}${entry.name}/` : `${entry.name}/`));
+            }
+            readBatch();
+          }, resolve);
+          readBatch();
+        } else resolve();
+      });
+      Promise.all(walker.map((en) => readEntry(en, ""))).then(() => {
+        for (const [path, f] of files) {
+          const top = path.includes("/") ? path.split("/")[0] : "";
+          if (!/\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(f.name)) continue;
+          if (!batches.has(top)) batches.set(top, []);
+          batches.get(top).push(f);
+        }
+        for (const [folder, fs] of batches)
+          for (const f of fs) uploadFile(f, { folder });
+      });
+      return;
+    }
+    // Plain files: upload loose (folder = "" → Uploads)
+    for (const file of e.dataTransfer.files) uploadFile(file, { folder: "" });
   });
 
   $("all-folders-btn").addEventListener("click", () => { location.hash = "#/"; });

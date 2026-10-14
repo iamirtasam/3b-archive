@@ -168,9 +168,11 @@
 
     <div class="upload-actions">
       <button class="btn btn-solid" id="pick-btn">CHOOSE FILES</button>
+      <button class="btn btn-ghost" id="pick-folder-btn">CHOOSE FOLDER</button>
       <input type="file" id="file-input" multiple hidden
              accept=".mp4,.m4v,.mov,.mkv,.avi,.webm">
-      <span class="mono-label" id="upload-hint">MP4 Â· MOV Â· MKV Â· AVI Â· WEBM â€” UP TO 25 GB EACH</span>
+      <input type="file" id="folder-input" webkitdirectory hidden>
+      <span class="mono-label" id="upload-hint">MP4 Â· MOV Â· MKV Â· AVI Â· WEBM â€” UP TO 50 GB EACH Â· FOLDERS WELCOME</span>
     </div>
 
     <div class="upload-queue" id="upload-queue"><!-- upload cards injected --></div>
