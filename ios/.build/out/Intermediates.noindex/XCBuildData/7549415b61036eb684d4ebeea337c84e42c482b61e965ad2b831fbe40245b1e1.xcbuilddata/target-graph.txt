@@ -1,8 +1,0 @@
-Target dependency graph (4 targets)
-Target 'AllExcludingTests' in project 'Aggregate'
-➜ Explicit dependency on target 'DalalArchive-App-product' in project 'DalalArchive-Builder'
-Target 'DalalArchive-App-product' in project 'DalalArchive-Builder'
-➜ Explicit dependency on target 'DalalArchive-product' in project 'DalalArchive'
-Target 'DalalArchive-product' in project 'DalalArchive'
-➜ Explicit dependency on target 'DalalArchive' in project 'DalalArchive'
-Target 'DalalArchive' in project 'DalalArchive' (no dependencies)

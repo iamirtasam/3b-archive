@@ -1,0 +1,5 @@
+# SwiftPM / xtool build artifacts
+.build/
+xtool/
+*.o
+*.dia

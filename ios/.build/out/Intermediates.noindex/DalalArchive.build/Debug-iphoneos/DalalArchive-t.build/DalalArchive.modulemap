@@ -1,4 +1,0 @@
-module DalalArchive {
-header "DalalArchive-Swift.h"
-export *
-}
