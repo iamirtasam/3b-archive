@@ -46,6 +46,52 @@
   const totalHours = (list) =>
     `${(list.reduce((a, v) => a + v.duration_seconds, 0) / 3600).toFixed(1)} HOURS`;
 
+  /* ---------------- archive management ----------------------------------- */
+
+  // One shared confirm flow for destructive/renaming actions. Returns the
+  // response of fn() after the user accepts, or undefined if cancelled.
+  async function manage(action, video) {
+    const v = video;
+    if (action === "delete") {
+      if (!confirm(`DELETE "${v.title}"?\n\nThe video and all its files are removed from S3 permanently.`)) return;
+      const r = await api("/api/videos/delete", { body: { slug: v.slug } });
+      if (r.status === 200) {
+        state.videos = state.videos.filter((x) => x.slug !== v.slug);
+        refreshAfterManage();
+      } else alert((r.data.error || "delete failed").toUpperCase());
+      return;
+    }
+    if (action === "rename") {
+      const t = prompt("NEW TITLE:", v.title);
+      if (!t || t.trim() === v.title) return;
+      const r = await api("/api/videos/rename", { body: { slug: v.slug, title: t.trim() } });
+      if (r.status === 200) {
+        v.title = t.trim();
+        refreshAfterManage();
+      } else alert((r.data.error || "rename failed").toUpperCase());
+      return;
+    }
+    if (action === "move") {
+      const f = prompt(`MOVE "${v.title}" TO FOLDER:\n(existing folders: ${[...new Set(state.videos.map((x) => x.folder))].join(", ")})`, v.folder);
+      if (!f || !f.trim() || f.trim() === v.folder) return;
+      const r = await api("/api/videos/move", { body: { slug: v.slug, folder: f.trim() } });
+      if (r.status === 200) {
+        v.folder = f.trim();
+        refreshAfterManage();
+      } else alert((r.data.error || "move failed").toUpperCase());
+      return;
+    }
+  }
+
+  function refreshAfterManage() {
+    $("hero-count").textContent = `${state.videos.length} TITLES`;
+    $("hero-hours").textContent = totalHours(state.videos);
+    renderFolderNav();
+    renderFolders();
+    renderGrid();
+    renderTicker();
+  }
+
   /* ---------------- folders + grids ------------------------------------- */
 
   const byFolder = () => {
@@ -90,10 +136,56 @@
           <span class="folder-name">${folder}</span>
           <span class="mono-label">${fmtMin(list.reduce((a, v) => a + v.duration_seconds, 0))} OF FOOTAGE</span>
         </div>
-        <span class="folder-arrow">&rarr;</span>`;
-      card.onclick = () => { location.hash = `#/folder/${encodeURIComponent(folder)}`; };
+        <span class="folder-arrow">&rarr;</span>
+        <span class="card-menu" title="manage folder">⋯</span>`;
+      card.onclick = (e) => {
+        if (e.target.closest(".card-menu")) {
+          folderMenu(e, folder);
+          return;
+        }
+        location.hash = `#/folder/${encodeURIComponent(folder)}`;
+      };
       grid.appendChild(card);
     }
+  }
+
+  async function folderMenu(e, folder) {
+    e.stopPropagation();
+    document.querySelector(".manage-menu")?.remove();
+    const menu = document.createElement("div");
+    menu.className = "manage-menu";
+    menu.innerHTML = `
+      <button data-act="rename">RENAME FOLDER</button>
+      <button data-act="delete" class="danger">DELETE FOLDER VIDEOS…</button>`;
+    menu.style.left = `${Math.min(e.clientX, window.innerWidth - 190)}px`;
+    menu.style.top = `${e.clientY}px`;
+    menu.addEventListener("click", async (ev) => {
+      const act = ev.target.dataset.act;
+      menu.remove();
+      if (act === "rename") {
+        const to = prompt(`RENAME FOLDER "${folder}" TO:`, folder);
+        if (!to || to.trim() === folder) return;
+        const r = await api("/api/folders/rename", { body: { from: folder, to: to.trim() } });
+        if (r.status === 200) {
+          const fresh = await api("/api/videos");
+          if (fresh.status === 200) { state.videos = fresh.data.videos; refreshAfterManage(); }
+        } else alert((r.data.error || "rename failed").toUpperCase());
+      } else if (act === "delete") {
+        if (!confirm(`DELETE EVERY VIDEO IN "${folder}"?\n\nAll files are removed from S3 permanently.`)) return;
+        const inFolder = state.videos.filter((v) => v.folder === folder);
+        for (const v of inFolder) {
+          await api("/api/videos/delete", { body: { slug: v.slug } });
+        }
+        const fresh = await api("/api/videos");
+        if (fresh.status === 200) { state.videos = fresh.data.videos; refreshAfterManage(); }
+      }
+    });
+    document.body.appendChild(menu);
+    setTimeout(() => {
+      document.addEventListener("click", function close(ev) {
+        if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener("click", close); }
+      });
+    }, 0);
   }
 
   function renderGrid() {
@@ -117,6 +209,7 @@
         <div class="video-thumb">
           <img src="${v.thumbnail}" alt="" loading="lazy">
           <span class="thumb-tag">${fmtMin(v.duration_seconds)}</span>
+          <span class="card-menu" title="manage">⋯</span>
         </div>
         <span class="video-title">${v.title}</span>
         <div class="video-meta">
@@ -125,11 +218,42 @@
                   `<span class="mono-label">${v.height ? `${v.height}P` : "HLS"}</span>`}
         </div>
         ${pct ? `<div class="video-progress"><div style="width:${pct}%"></div></div>` : ""}`;
-      card.onclick = () => { location.hash = `#/watch/${v.slug}`; };
+      card.onclick = (e) => {
+        if (e.target.closest(".card-menu")) {
+          manageMenu(e, v);
+          return;
+        }
+        location.hash = `#/watch/${v.slug}`;
+      };
       grid.appendChild(card);
     }
     $("all-folders-btn").hidden = state.folder === null;
     $("folder-section").hidden = state.folder !== null;
+  }
+
+  // Floating action menu per card: rename / move / delete.
+  function manageMenu(e, v) {
+    e.stopPropagation();
+    document.querySelector(".manage-menu")?.remove();
+    const menu = document.createElement("div");
+    menu.className = "manage-menu";
+    menu.innerHTML = `
+      <button data-act="rename">RENAME</button>
+      <button data-act="move">MOVE TO FOLDER</button>
+      <button data-act="delete" class="danger">DELETE</button>`;
+    menu.style.left = `${Math.min(e.clientX, window.innerWidth - 190)}px`;
+    menu.style.top = `${e.clientY}px`;
+    menu.addEventListener("click", async (ev) => {
+      const act = ev.target.dataset.act;
+      menu.remove();
+      if (act) await manage(act, v);
+    });
+    document.body.appendChild(menu);
+    setTimeout(() => {
+      document.addEventListener("click", function close(ev) {
+        if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener("click", close); }
+      });
+    }, 0);
   }
 
   function renderTicker() {
