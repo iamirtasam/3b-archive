@@ -338,8 +338,23 @@ def _validate_upload(filename: str, size: int) -> str | None:
     return None
 
 
-def _part_count(size: int) -> int:
-    return max(1, -(-size // PART_SIZE))
+def _part_count(size: int, part_size: int) -> int:
+    return max(1, -(-size // part_size))
+
+
+GB = 1024 ** 3
+
+
+def _part_size_for(size: int) -> int:
+    """Larger parts for larger files. S3's CompleteMultipartUpload assembly
+    time scales with part count, and the API gateway cuts requests at 30 s -
+    the classic large-file 'FINISH FAILED' that actually succeeded
+    server-side. Keeping the count <=~512 keeps the finish call fast."""
+    if size <= 8 * GB:
+        return PART_SIZE              # 16 MB -> <=512 parts at 8 GB
+    if size <= 32 * GB:
+        return 64 * 1024 * 1024      # 64 MB -> <=512 parts at 32 GB
+    return 128 * 1024 * 1024         # 128 MB -> <=400 parts at 50 GB
 
 
 def _uploads_list(event: dict) -> dict:
@@ -383,15 +398,16 @@ def _upload_start(event: dict) -> dict:
 
     s3 = boto3.client("s3")
     key = f"{UPLOAD_PREFIX}/{username}/{folder}/{filename}"
+    part_size = _part_size_for(size)
     created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = created["UploadId"]
     return _json(200, {
         "upload_id": upload_id,
         "key": key,
-        "part_size": PART_SIZE,
-        "part_count": _part_count(size),
+        "part_size": part_size,
+        "part_count": _part_count(size, part_size),
         "urls": _presign_parts(key, upload_id, 1,
-                               min(_part_count(size), PARTS_PER_PAGE)),
+                               min(_part_count(size, part_size), PARTS_PER_PAGE)),
     })
 
 
