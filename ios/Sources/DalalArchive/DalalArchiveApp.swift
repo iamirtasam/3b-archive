@@ -2,35 +2,76 @@ import SwiftUI
 
 @main
 struct DalalArchiveApp: App {
+    init() {
+        Fonts.register
+        try? AVAudioSession.sharedInstance().setCategory(.playback)  // background audio
+    }
+
     var body: some Scene {
-        WindowGroup {
-            RootView()
-                .preferredColorScheme(.light)   // the design system is light-only
-        }
+        WindowGroup { RootView() }
     }
 }
 
-// Temporary root until the API layer lands: shows the login view wired to
-// local state so the design can be reviewed on-device immediately.
+enum Route: Hashable {
+    case archive(username: String, videos: [Video])
+    case player(Video)
+}
+
 struct RootView: View {
-    @State private var username = ""
-    @State private var password = ""
-    @State private var busy = false
-    @State private var error: String? = nil
+    @State private var username: String? = nil
+    @State private var videos: [Video] = []
+    @State private var loading = false
+    @State private var loginError: String?
+    @State private var loginUsername = ""
+    @State private var loginPassword = ""
 
     var body: some View {
-        LoginView(username: $username, password: $password,
-                  busy: busy, error: error) {
-            Task { await fakeLogin() }
+        NavigationStack {
+            if let username {
+                ArchiveView(username: username, videos: videos,
+                            onLogout: { Task { await logout() } })
+                    .navigationDestination(for: Video.self) { v in
+                        PlayerView(video: v)
+                            .navigationBarHidden(true)
+                    }
+            } else {
+                LoginView(username: $loginUsername, password: $loginPassword,
+                          busy: loading, error: loginError) {
+                    Task { await login() }
+                }
+            }
+        }
+        .task {
+            // Returning app open: if the session cookie is still valid,
+            // drop straight into the archive (like the site's boot check).
+            if !loading, username == nil {
+                loading = true
+                defer { loading = false }
+                if let (user, vids) = try? await API.videos() {
+                    username = user
+                    videos = vids
+                }
+            }
         }
     }
 
-    // Placeholder — replaced by the real API client next step.
-    private func fakeLogin() async {
-        busy = true
-        error = nil
-        try? await Task.sleep(for: .seconds(1))
-        busy = false
-        error = "API client lands in the next commit"
+    private func login() async {
+        loading = true
+        loginError = nil
+        defer { loading = false }
+        do {
+            username = try await API.login(username: loginUsername, password: loginPassword)
+            loginPassword = ""
+            (_, videos) = try await API.videos()
+        } catch {
+            loginError = (error as? LocalizedError)?.errorDescription ?? "NETWORK ERROR"
+        }
+    }
+
+    private func logout() async {
+        await API.logout()
+        username = nil
+        videos = []
+        loginUsername = ""
     }
 }
