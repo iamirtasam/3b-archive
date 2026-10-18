@@ -693,14 +693,51 @@
 
   // Group picked/dropped files by their top-level folder and upload each
   // batch with that folder name (webkitRelativePath: "Folder/file.mp4").
+  const VIDEO_EXT = /\.(mp4|m4v|mov|mkv|avi|webm)$/i;
+  const MAX_BYTES = 50 * 1024 ** 3;
+
+  function rejectReason(file) {
+    if (file.size <= 0) return "EMPTY FILE (0 BYTES)";
+    if (file.size > MAX_BYTES) {
+      return `OVER THE 50 GB LIMIT (${fmtBytes(file.size)})`;
+    }
+    if (!VIDEO_EXT.test(file.name)) {
+      const ext = file.name.includes(".")
+        ? file.name.slice(file.name.lastIndexOf("."))
+        : "(NO EXTENSION)";
+      return `UNSUPPORTED TYPE ${ext.toUpperCase()} — MP4/MOV/MKV/AVI/M4V/WEBM ONLY`;
+    }
+    return null;
+  }
+
+  function skipNote(text) {
+    const note = document.createElement("div");
+    note.className = "skip-note";
+    note.textContent = text;
+    $("upload-queue").prepend(note);
+  }
+
   function enqueueFolderPicked(fileList) {
-    const groups = new Map(); // folder -> files[]
+    const groups = new Map();
+    const skipped = {};
     for (const file of fileList) {
       const rel = file.webkitRelativePath || "";
       const top = rel.includes("/") ? rel.split("/")[0] : "";
-      if (!/\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(file.name)) continue;
+      const reason = rejectReason(file);
+      if (reason) {
+        const label = reason.startsWith("UNSUPPORTED")
+          ? (file.name.match(/\.[^.]+$/) || ["other"])[0].toLowerCase()
+          : (reason.startsWith("EMPTY") ? "empty" : "over 50 GB");
+        skipped[label] = (skipped[label] || 0) + 1;
+        continue;
+      }
       if (!groups.has(top)) groups.set(top, []);
       groups.get(top).push(file);
+    }
+    const n = Object.values(skipped).reduce((a, b) => a + b, 0);
+    if (n) {
+      skipNote(`SKIPPED ${n} FILE${n === 1 ? "" : "S"} — ` +
+        Object.entries(skipped).map(([k, c]) => `${k} ×${c}`).join(", "));
     }
     for (const [folder, files] of groups) {
       for (const file of files) uploadFile(file, { folder });
@@ -725,8 +762,9 @@
         const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
         if (entry) walker.push(entry);
       }
-      const batches = new Map(); // topFolder -> {path->Promise<File>}
+      const batches = new Map(); // topFolder -> files
       const files = new Map();   // path -> File (flat entries)
+      const skipped = {};
       const readEntry = (entry, base) => new Promise((resolve) => {
         if (entry.isFile) {
           entry.file((f) => { files.set(base + f.name, f); resolve(); }, resolve);
@@ -749,17 +787,37 @@
       Promise.all(walker.map((en) => readEntry(en, ""))).then(() => {
         for (const [path, f] of files) {
           const top = path.includes("/") ? path.split("/")[0] : "";
-          if (!/\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(f.name)) continue;
+          const reason = rejectReason(f);
+          if (reason) {
+            const label = reason.startsWith("UNSUPPORTED")
+              ? (f.name.match(/\.[^.]+$/) || ["other"])[0].toLowerCase()
+              : (reason.startsWith("EMPTY") ? "empty" : "over 50 GB");
+            skipped[label] = (skipped[label] || 0) + 1;
+            continue;
+          }
           if (!batches.has(top)) batches.set(top, []);
           batches.get(top).push(f);
+        }
+        const n = Object.values(skipped).reduce((a, b) => a + b, 0);
+        if (n) {
+          skipNote(`SKIPPED ${n} FILE${n === 1 ? "" : "S"} — ` +
+            Object.entries(skipped).map(([k, c]) => `${k} ×${c}`).join(", "));
         }
         for (const [folder, fs] of batches)
           for (const f of fs) uploadFile(f, { folder });
       });
       return;
     }
-    // Plain files: upload loose (folder = "" → Uploads)
-    for (const file of e.dataTransfer.files) uploadFile(file, { folder: "" });
+    // Plain files: validate individually so the user sees real reasons.
+    for (const file of e.dataTransfer.files) {
+      const reason = rejectReason(file);
+      if (reason) {
+        uploadCard(file, "");
+        setProgress(file, 0, reason, "");
+        continue;
+      }
+      uploadFile(file, { folder: "" });
+    }
   });
 
   $("all-folders-btn").addEventListener("click", () => { location.hash = "#/"; });
