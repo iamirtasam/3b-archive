@@ -594,14 +594,13 @@
                        ({ part_number, etag })) },
       });
     } catch {
-      // Network/gateway timeout: S3 is still assembling the parts (30-90 s
-      // on big files) and almost always finishes. Verify via the catalog
-      // instead of declaring failure - waitForLive flips the card.
+      // Network cut on the finish call: the async finisher job likely has
+      // it. Watch the catalog instead of failing.
       done = { status: 599, data: {} };
     }
     if (done.status === 200) {
       const secs = (Date.now() - startedAt) / 1000;
-      setProgress(file, 100, "UPLOADED — PACKAGING…",
+      setProgress(file, 100, "UPLOADED — FINISHING IN CLOUD…",
         `${fmtBytes(file.size / Math.max(secs, 1))}/S AVG`);
       clearMeta(file);
       refreshStaged();
@@ -609,18 +608,15 @@
       return;
     }
     if (done.status === 599 || done.status === 504) {
-      // The finish call was cut off, not refused. Poll the catalog; if the
-      // video lands, show LIVE. If it truly never lands, the reopen path
-      // (parts are on S3) can still complete it.
       clearMeta(file);
       setProgress(file, 100, "FINISHING ON S3 — VERIFYING…",
         "BIG FILE ASSEMBLY, HANG TIGHT");
       await waitForLive(file, null);
       return;
     }
-    // Genuine refusal (e.g. InvalidPart): bytes are safe, reopen re-completes.
-    setProgress(file, 100, "FINISH FAILED — REOPEN TO RESUME",
-      (done.data.error || "").toUpperCase());
+    // Genuine refusal (e.g. already archived): surface the reason.
+    setProgress(file, 100, `REJECTED — ${(done.data.error || "").toUpperCase()}`,
+      "FINISH FAILED");
   }
 
   // The Lambda packaging job runs for a minute or two after complete; poll

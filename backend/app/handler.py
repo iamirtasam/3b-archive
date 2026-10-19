@@ -70,9 +70,12 @@ _private_key_cache: str | None = None
 
 
 def lambda_handler(event, context):
-    # Background invocation fired by _upload_complete (Event source = async).
+    # Background invocations fired by _upload_complete (Event = async).
     if event.get("action") == "package":
         return _package_job(event)
+    if event.get("action") == "finish":
+        event["context_arn"] = context.invoked_function_arn
+        return _finish_job(event)
 
     method = event.get("requestContext", {}).get("http", {}).get("method", "")
     path = event.get("rawPath", "")
@@ -404,8 +407,7 @@ def _upload_start(event: dict) -> dict:
     if _table(VIDEOS_TABLE).get_item(Key={"slug": slug}).get("Item"):
         return _json(409, {"error": "already in the archive",
                            "slug": slug})
-    part_size = _part_size_for(size)
-    created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
+    part_size = _part_size_for(size)    created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = created["UploadId"]
     return _json(200, {
         "upload_id": upload_id,
@@ -464,9 +466,13 @@ def _slug_for(key: str, filename: str) -> str:
 
 
 def _upload_complete(event: dict, context) -> dict:
-    """Finish the multipart session server-side from the part list the
-    browser collected - no upload bytes ever flow through Lambda. Then kick
-    off the async packaging job so the video publishes itself."""
+    """Hand the finished upload to an async finisher and return instantly.
+
+    The browser must NOT wait on S3's CompleteMultipartUpload: assembly time
+    scales with part count and the API gateway cuts requests at 30 s - the
+    classic large-file 'FINISH FAILED' that actually succeeded server-side.
+    The finisher assembles from S3's own part list with a 10-minute read
+    budget, then hands off to the packager as its own async job."""
     username = _require_session(event)
     if username is None:
         return _json(401, {"error": "not logged in"})
@@ -474,27 +480,10 @@ def _upload_complete(event: dict, context) -> dict:
     body = _parse_body(event)
     key = str(body.get("key", ""))
     upload_id = str(body.get("upload_id", ""))
-    raw_parts = body.get("parts", [])
     if not _own_key(username, key):
         return _json(403, {"error": "not your upload"})
-    if not upload_id or not raw_parts:
-        return _json(400, {"error": "upload_id and parts are required"})
-
-    # S3 rejects CompleteMultipartUpload unless part numbers ascend.
-    # Concurrent browser workers finish out of order, so sort here.
-    parts = sorted(
-        ({"PartNumber": int(p["part_number"]), "ETag": str(p["etag"])}
-         for p in raw_parts if p.get("etag")),
-        key=lambda p: p["PartNumber"],
-    )
-    try:
-        boto3.client("s3").complete_multipart_upload(
-            Bucket=BUCKET, Key=key, UploadId=upload_id,
-            MultipartUpload={"Parts": parts},
-        )
-    except ClientError as err:
-        code = err.response.get("Error", {}).get("Code", "UnknownError")
-        return _json(409, {"error": f"S3 refused completion ({code})"})
+    if not upload_id:
+        return _json(400, {"error": "upload_id is required"})
 
     filename = key.rsplit("/", 1)[-1]
     slug = _slug_for(key, filename)
@@ -503,13 +492,59 @@ def _upload_complete(event: dict, context) -> dict:
         boto3.client("lambda").invoke(
             FunctionName=context.invoked_function_arn,
             InvocationType="Event",           # fire-and-forget background job
-            Payload=json.dumps(
-                {"action": "package", "key": key, "slug": slug, "title": title}),
+            Payload=json.dumps({"action": "finish", "key": key,
+                                "upload_id": upload_id, "slug": slug,
+                                "title": title}),
         )
     except Exception as err:  # noqa: BLE001 - upload still counts as staged
-        print(f"WARN package invoke failed for {key}: {err!r}")
-
+        print(f"WARN finish invoke failed for {key}: {err!r}")
+        return _json(500, {"error": "could not start the finish job"})
     return _json(200, {"ok": True, "key": key, "slug": slug})
+
+
+def _finish_job(event: dict) -> dict:
+    """Assemble the multipart upload from S3's own part list (the source of
+    truth - the browser's list is never trusted), then fire the packager as
+    its own async job so assembly and remux each get a full 15-minute
+    Lambda window."""
+    key = str(event.get("key", ""))
+    upload_id = str(event.get("upload_id", ""))
+    slug = str(event.get("slug", ""))
+    title = str(event.get("title", slug))
+    if not key or not upload_id or not slug or not BUCKET:
+        return {"ok": False, "reason": "bad invocation"}
+
+    from botocore.config import Config
+    # S3 assembly time scales with part count; the default 60 s client read
+    # timeout loses races with slow assemblies. 10 minutes covers 10,000.
+    s3 = boto3.client("s3", config=Config(read_timeout=600, connect_timeout=60,
+                                          retries={"max_attempts": 5}))
+    parts, token = [], None
+    while True:
+        kw = dict(Bucket=BUCKET, Key=key, UploadId=upload_id)
+        if token:
+            kw["PartNumberMarker"] = token
+        r = s3.list_parts(**kw)
+        parts.extend(r.get("Parts", []))
+        token = r.get("NextPartNumberMarker")
+        if not r.get("IsTruncated"):
+            break
+    if not parts:
+        print(f"FINISH {key}: no parts found - nothing to assemble")
+        return {"ok": False, "reason": "no parts"}
+    parts.sort(key=lambda p: p["PartNumber"])
+    s3.complete_multipart_upload(
+        Bucket=BUCKET, Key=key, UploadId=upload_id,
+        MultipartUpload={"Parts": [
+            {"PartNumber": p["PartNumber"], "ETag": p["ETag"]} for p in parts]})
+    gb = sum(p["Size"] for p in parts) / 1e9
+    print(f"FINISH {key}: assembled {len(parts)} parts ({gb:.2f} GB)")
+
+    boto3.client("lambda").invoke(
+        FunctionName=event["context_arn"], InvocationType="Event",
+        Payload=json.dumps({"action": "package", "key": key, "slug": slug,
+                            "title": title}))
+    return {"ok": True, "slug": slug, "assembled_gb": round(gb, 2)}
 
 
 def _upload_abort(event: dict) -> dict:
