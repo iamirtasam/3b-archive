@@ -407,7 +407,8 @@ def _upload_start(event: dict) -> dict:
     if _table(VIDEOS_TABLE).get_item(Key={"slug": slug}).get("Item"):
         return _json(409, {"error": "already in the archive",
                            "slug": slug})
-    part_size = _part_size_for(size)    created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
+    part_size = _part_size_for(size)
+    created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = created["UploadId"]
     return _json(200, {
         "upload_id": upload_id,
