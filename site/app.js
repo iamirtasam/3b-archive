@@ -459,6 +459,29 @@
     }
   }
 
+  // Whole-file queue: a few files upload at a time so each makes visible
+  // progress (parts completing) instead of 20 files starving one uplink.
+  const uploadQueue = [];
+  let activeUploads = 0;
+  const MAX_ACTIVE_FILES = 4;
+
+  function queueUpload(file, folder) {
+    uploadCard(file, folder);
+    setProgress(file, 0, "QUEUED…", "");
+    uploadQueue.push({ file, folder });
+    pumpUploads();
+  }
+
+  function pumpUploads() {
+    while (activeUploads < MAX_ACTIVE_FILES && uploadQueue.length) {
+      const job = uploadQueue.shift();
+      activeUploads++;
+      uploadFile(job.file, { folder: job.folder })
+        .catch((err) => console.error("upload failed:", err))
+        .finally(() => { activeUploads--; pumpUploads(); });
+    }
+  }
+
   async function uploadFile(file, opts = {}, isRetry = false) {
     uploadCard(file, opts.folder);
     const startedAt = Date.now();
@@ -527,6 +550,8 @@
         for (let attempt = 1; attempt <= PART_RETRIES; attempt++) {
           try {
             const url = await presignUrl(meta, partNumber);
+            setProgress(file, (uploadedBytes / file.size) * 100,
+              `SENDING PART ${completed.size + 1}/${total}`, "");
             const res = await fetch(url, { method: "PUT", body: blob });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             completed.set(partNumber, res.headers.get("ETag").replaceAll('"', ""));
@@ -765,14 +790,10 @@
       skipNote(`SKIPPED ${n} FILE${n === 1 ? "" : "S"} — ` +
         Object.entries(skipped).map(([k, c]) => `${k} ×${c}`).join(", "));
     }
-    // Stagger batch starts: N simultaneous create-multipart calls get
-    // connections dropped at the gateway; 300 ms apart keeps it smooth.
-    let delay = 0;
+    // Stagger removed in favor of the whole-file queue: files line up
+    // QUEUED… and start as earlier ones finish.
     for (const [folder, files] of groups) {
-      for (const file of files) {
-        setTimeout(() => uploadFile(file, { folder }), delay);
-        delay += 300;
-      }
+      for (const file of files) queueUpload(file, folder);
     }
   }
 
@@ -837,10 +858,7 @@
         }
         let delay = 0;
         for (const [folder, fs] of batches) {
-          for (const f of fs) {
-            setTimeout(() => uploadFile(f, { folder }), delay);
-            delay += 300;
-          }
+          for (const f of fs) queueUpload(f, folder);
         }
       });
       return;
