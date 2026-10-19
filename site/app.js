@@ -438,6 +438,26 @@
   const PART_CONCURRENCY = 3;
   const PART_RETRIES = 3;
 
+  async function uploadStartWithRetry(file, opts) {
+    // Burst-starts can kill browser→gateway connections before the server
+    // even sees them (generic fetch throw = network, not rejection). Retry
+    // those; only a real HTTP status counts as a verdict.
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const r = await api("/api/uploads", {
+          body: { filename: file.name, size_bytes: file.size,
+                  folder: opts.folder || "" },
+        });
+        if (r.status === 200) return r;
+        return { ...r, rejected: true };   // server's actual verdict
+      } catch {
+        if (attempt === 4) return { status: 0, data: {}, rejected: false };
+        setProgress(file, 0, `CONNECTING — RETRY ${attempt}/3`, "");
+        await new Promise((r) => setTimeout(r, 800 * attempt));
+      }
+    }
+  }
+
   async function uploadFile(file, opts = {}, isRetry = false) {
     uploadCard(file, opts.folder);
     const startedAt = Date.now();
@@ -445,12 +465,13 @@
     // Resume: reuse the multipart session saved before a close/refresh.
     let meta = loadMeta(file);
     if (!meta) {
-      const r = await api("/api/uploads", {
-        body: { filename: file.name, size_bytes: file.size,
-                folder: opts.folder || "" },
-      });
-      if (r.status !== 200) {
-        setProgress(file, 0, (r.data.error || "REJECTED").toUpperCase(), "");
+      const r = await uploadStartWithRetry(file, opts);
+      if (r.rejected) {
+        setProgress(file, 0, `REJECTED — ${r.data.error || "SERVER SAID NO"}`, "");
+        return;
+      }
+      if (r.status === 0) {
+        setProgress(file, 0, "CONNECTION FAILED — RETRY LATER", "");
         return;
       }
       meta = { uploadId: r.data.upload_id, key: r.data.key,
@@ -739,8 +760,14 @@
       skipNote(`SKIPPED ${n} FILE${n === 1 ? "" : "S"} — ` +
         Object.entries(skipped).map(([k, c]) => `${k} ×${c}`).join(", "));
     }
+    // Stagger batch starts: N simultaneous create-multipart calls get
+    // connections dropped at the gateway; 300 ms apart keeps it smooth.
+    let delay = 0;
     for (const [folder, files] of groups) {
-      for (const file of files) uploadFile(file, { folder });
+      for (const file of files) {
+        setTimeout(() => uploadFile(file, { folder }), delay);
+        delay += 300;
+      }
     }
   }
 
@@ -803,8 +830,13 @@
           skipNote(`SKIPPED ${n} FILE${n === 1 ? "" : "S"} — ` +
             Object.entries(skipped).map(([k, c]) => `${k} ×${c}`).join(", "));
         }
-        for (const [folder, fs] of batches)
-          for (const f of fs) uploadFile(f, { folder });
+        let delay = 0;
+        for (const [folder, fs] of batches) {
+          for (const f of fs) {
+            setTimeout(() => uploadFile(f, { folder }), delay);
+            delay += 300;
+          }
+        }
       });
       return;
     }
