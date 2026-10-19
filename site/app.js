@@ -449,7 +449,8 @@
                   folder: opts.folder || "" },
         });
         if (r.status === 200) return r;
-        return { ...r, rejected: true };   // server's actual verdict
+        return { ...r, rejected: true,
+                 archived: r.data.error === "already in the archive" };
       } catch {
         if (attempt === 4) return { status: 0, data: {}, rejected: false };
         setProgress(file, 0, `CONNECTING — RETRY ${attempt}/3`, "");
@@ -466,6 +467,10 @@
     let meta = loadMeta(file);
     if (!meta) {
       const r = await uploadStartWithRetry(file, opts);
+      if (r.archived) {
+        setProgress(file, 100, "ALREADY IN ARCHIVE — SKIPPED", "");
+        return;
+      }
       if (r.rejected) {
         setProgress(file, 0, `REJECTED — ${r.data.error || "SERVER SAID NO"}`, "");
         return;

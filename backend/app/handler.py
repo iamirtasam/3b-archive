@@ -398,6 +398,12 @@ def _upload_start(event: dict) -> dict:
 
     s3 = boto3.client("s3")
     key = f"{UPLOAD_PREFIX}/{username}/{folder}/{filename}"
+    # Deterministic slug (same formula the packager uses): if this exact
+    # file is already archived, say so instead of re-uploading it.
+    slug = _slug_for(key, filename)
+    if _table(VIDEOS_TABLE).get_item(Key={"slug": slug}).get("Item"):
+        return _json(409, {"error": "already in the archive",
+                           "slug": slug})
     part_size = _part_size_for(size)
     created = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
     upload_id = created["UploadId"]
