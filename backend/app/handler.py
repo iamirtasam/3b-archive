@@ -949,15 +949,26 @@ def _yt_playlist_for(yt, folder: str, privacy: str) -> str:
         token = resp.get("nextPageToken")
         if not token:
             break
-    pl = yt.playlists().insert(part="snippet,status", body={
-        "snippet": {"title": folder[:150],
-                    "description": f"3B Archive folder — {folder}."},
-        "status": {"privacyStatus": privacy},
-    }).execute()
-    table.put_item(Item={"slug": f"pl:{folder.lower()}",
-                         "playlist_id": pl["id"]})
-    print(f"YT playlist created: {folder} ({pl['id']})")
-    return pl["id"]
+    # Newly created playlists can 404 on immediate use - retry the insert
+    # with a short backoff instead of failing the whole push.
+    last_err = None
+    for attempt in range(5):
+        try:
+            pl = yt.playlists().insert(part="snippet,status", body={
+                "snippet": {"title": folder[:150],
+                            "description": f"3B Archive folder — {folder}."},
+                "status": {"privacyStatus": privacy},
+            }).execute()
+            table.put_item(Item={"slug": f"pl:{folder.lower()}",
+                                 "playlist_id": pl["id"]})
+            print(f"YT playlist created: {folder} ({pl['id']})")
+            return pl["id"]
+        except Exception as err:  # noqa: BLE001
+            if "playlistNotFound" not in str(err):
+                raise
+            last_err = err
+            time.sleep(10)
+    raise last_err
 
 
 def _yt_in_playlist(yt, playlist_id: str, video_id: str) -> bool:
@@ -1037,9 +1048,21 @@ def _yt_push_job(event: dict) -> dict:
 
     pl_id = _yt_playlist_for(yt, folder, privacy)
     if not _yt_in_playlist(yt, pl_id, vid):
-        yt.playlistItems().insert(part="snippet", body={
-            "snippet": {"playlistId": pl_id, "resourceId": {
-                "kind": "youtube#video", "videoId": vid}}}).execute()
+        last_err = None
+        for attempt in range(4):
+            try:
+                yt.playlistItems().insert(part="snippet", body={
+                    "snippet": {"playlistId": pl_id, "resourceId": {
+                        "kind": "youtube#video", "videoId": vid}}}).execute()
+                break
+            except Exception as err:  # noqa: BLE001
+                if "playlistNotFound" not in str(err):
+                    raise
+                last_err = err
+                time.sleep(10)
+        if last_err:
+            raise last_err
+        print(f"YT filed into playlist: {folder}")
     yt_table.put_item(Item={
         "slug": slug, "youtube_id": vid, "privacy": actual_priv,
         "pushed_at": int(time.time())})
