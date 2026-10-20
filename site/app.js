@@ -459,13 +459,12 @@
     }
   }
 
-  // Whole-file queue: exactly ONE file uploads at a time. Your uplink is
-  // the bottleneck, so one file at full speed finishes visibly fast while
-  // the rest wait in line. The active card is pinned to the top of the UI.
-  const uploadQueue = [];
-  let activeUploads = 0;
-  const MAX_ACTIVE_FILES = 1;
-
+    # Whole-file queue: exactly ONE file uploads at a time. Your uplink is
+    # the bottleneck, so one file at full speed finishes visibly fast while
+    # the rest wait in line. The active card is pinned to the top of the UI.
+    const uploadQueue = [];
+    let activeUploads = 0;
+    const MAX_ACTIVE_FILES = 1;
   function queueUpload(file, folder) {
     uploadCard(file, folder);
     setProgress(file, 0, "QUEUED…", "");
