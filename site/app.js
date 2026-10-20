@@ -491,9 +491,8 @@
   }
 
   async function uploadFile(file, opts = {}, isRetry = false) {
-    pinActive(file);
-    const startedAt = Date.now();
     uploadCard(file, opts.folder);
+    pinActive(file);
     const startedAt = Date.now();
 
     // Resume: reuse the multipart session saved before a close/refresh.
