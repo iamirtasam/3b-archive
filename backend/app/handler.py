@@ -1013,7 +1013,7 @@ def _yt_push_job(event: dict) -> dict:
         offset += h["ContentLength"]
     total = offset
 
-    media = _yt_push_media(s3, parts, total)
+    media = _yt_push_media(s3, parts, total)._impl
     body = {
         "snippet": {"title": title[:100],
                     "description": f"3B Archive — {folder}.",
