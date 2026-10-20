@@ -77,6 +77,7 @@ def create_tables(session: boto3.session.Session) -> None:
         f"{TABLE_PREFIX}users": ("username", None),
         f"{TABLE_PREFIX}sessions": ("token_hash", "expires"),
         f"{TABLE_PREFIX}videos": ("slug", None),
+        f"{TABLE_PREFIX}youtube": ("slug", None),
     }
     for name, (hash_key, ttl_attr) in tables.items():
         try:
@@ -172,8 +173,8 @@ def ensure_role(session: boto3.session.Session) -> str:
                 },
                 {
                     "Effect": "Allow",
-                    "Action": "ssm:GetParameter",
-                    "Resource": f"arn:aws:ssm:{REGION}:{account}:parameter{SSM_PARAM_NAME}",
+                    "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+                    "Resource": f"arn:aws:ssm:{REGION}:{account}:parameter/s3-streaming/*",
                 },
                 {
                     # Presigning itself needs no permission; these cover the
@@ -226,8 +227,8 @@ def build_lambda_zip() -> Path:
     app_dir = BUILD / "app"
     zip_path = BUILD / "function.zip"
 
+    package_dir.mkdir(parents=True, exist_ok=True)
     if not (package_dir / "cryptography").exists():
-        package_dir.mkdir(parents=True, exist_ok=True)
         print("Installing cryptography for Linux (Lambda runtime)...")
         subprocess.run(
             [
@@ -236,6 +237,18 @@ def build_lambda_zip() -> Path:
                 "--implementation", "cp", "--python-version", "3.12",
                 "--only-binary=:all:", "--target", str(package_dir),
                 "cryptography",
+            ],
+            check=True,
+        )
+    if not (package_dir / "googleapiclient").exists():
+        print("Installing Google API client for Linux (Lambda runtime)...")
+        subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install", "--quiet",
+                "--platform", "manylinux2014_x86_64",
+                "--implementation", "cp", "--python-version", "3.12",
+                "--only-binary=:all:", "--target", str(package_dir),
+                "google-api-python-client", "google-auth", "httplib2",
             ],
             check=True,
         )
@@ -282,6 +295,7 @@ def ensure_function(
             "SSM_PARAM": SSM_PARAM_NAME,
             "TABLE_PREFIX": TABLE_PREFIX,
             "BUCKET": BUCKET,
+            "YT_TOKEN_PARAM": f"/{PREFIX}/youtube-token",
         }
     }
     # The vendored ffmpeg pushes the zip past Lambda's 50 MB direct-upload
@@ -296,7 +310,7 @@ def ensure_function(
     config = {
         "Runtime": "python3.12",
         "Timeout": 900,
-        "MemorySize": 1024,
+        "MemorySize": 2048,
         "EphemeralStorage": {"Size": 10240},
         "Environment": env,
     }

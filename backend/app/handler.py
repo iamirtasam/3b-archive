@@ -76,6 +76,12 @@ def lambda_handler(event, context):
     if event.get("action") == "finish":
         event["context_arn"] = context.invoked_function_arn
         return _finish_job(event)
+    if event.get("action") == "yt_push":
+        event["context_arn"] = context.invoked_function_arn
+        return _yt_push_job(event)
+    if event.get("action") == "yt_push_all":
+        event["context_arn"] = context.invoked_function_arn
+        return _yt_push_all_job(event)
 
     method = event.get("requestContext", {}).get("http", {}).get("method", "")
     path = event.get("rawPath", "")
@@ -798,6 +804,308 @@ def _presign_parts(key: str, upload_id: str,
             ExpiresIn=PRESIGN_TTL,
         ),
     } for n in range(from_part, to_part + 1)]
+
+
+# ------------------------------------------------------- YouTube push job
+#
+# Streams an archived video straight into YouTube's resumable upload:
+#   - reads the OAuth token from SSM (SecureString), refreshes it when
+#     expired and writes the fresh token back
+#   - serves the video as random-access bytes over S3 range reads (the
+#     fMP4 init + segments concatenated IS a valid MP4)
+#   - files the video into a playlist named after its archive folder
+#   - records the result in svg_youtube so pushes are never duplicated
+#
+# Queue the whole archive with: action=yt_push_all (one Event invocation
+# per video, chain-driven, so every video gets its own 15-min window).
+
+YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
+             "https://www.googleapis.com/auth/youtube"]
+
+
+def _yt_token() -> dict:
+    """Load the OAuth token from SSM, refreshing if expired."""
+    import requests
+    ssm = _ssm_client()
+    param = os.environ["YT_TOKEN_PARAM"]
+    token = json.loads(
+        ssm.get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"])
+
+    if token.get("expiry") and time.time() < float(token["expiry"]) - 60:
+        return token
+
+    client = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={"client_id": token["client_id"],
+              "client_secret": token["client_secret"],
+              "refresh_token": token["refresh_token"],
+              "grant_type": "refresh_token"}, timeout=30).json()
+    if "access_token" not in client:
+        raise RuntimeError(f"token refresh failed: {client}")
+    token["token"] = client["access_token"]
+    token["expiry"] = time.time() + int(client.get("expires_in", 3600))
+    ssm.put_parameter(Name=param, Value=json.dumps(token), Type="SecureString",
+                      Overwrite=True)
+    return token
+
+
+def _yt_client():
+    from googleapiclient.discovery import build
+    token = _yt_token()
+    return build("youtube", "v3",
+                 developerKey=None,
+                 credentials=None,
+                 static_discovery=False,
+                 _http=None) if False else _yt_build(token)
+
+
+def _yt_build(token: dict):
+    import google.auth.transport.requests as gtr
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    class _SSMCreds:
+        """Credentials shim backed by the SSM-stored refresh token."""
+
+        def __init__(self, tok):
+            self.token = tok["token"]
+            self.expiry = None
+
+        def refresh(self, request):
+            tok = _yt_token()
+            self.token = tok["token"]
+
+        def apply(self, headers, *a, **kw):
+            headers["authorization"] = f"Bearer {self.token}"
+
+    creds = Credentials(
+        token=token["token"], refresh_token=token["refresh_token"],
+        client_id=token["client_id"], client_secret=token["client_secret"],
+        scopes=YT_SCOPES)
+    return build("youtube", "v3", credentials=creds, static_discovery=False)
+
+
+class _S3RangeVideo:
+    """googleapiclient MediaUpload serving an S3 object with range reads -
+    the archive video as one seekable MP4 without touching /tmp."""
+
+    def __init__(self, s3, key: str, size: int, chunk: int = 16 * 1024 * 1024):
+        from googleapiclient.http import MediaUpload
+        self._s3, self._key, self._size, self._chunk = s3, key, size, chunk
+        self.pos = 0
+
+    def size(self):
+        return self._size
+
+    def chunksize(self):
+        return self._chunk
+
+    def resumable(self):
+        return True
+
+    def mimetype(self):
+        return "video/mp4"
+
+    def getbytes(self, begin: int, length: int) -> bytes:
+        if begin >= self._size:
+            return b""
+        length = min(length, self._size - begin)
+        rng = f"bytes={begin}-{begin + length - 1}"
+        return self._s3.get_object(Bucket=BUCKET, Key=self._key,
+                                   Range=rng)["Body"].read()
+
+    def _replayable(self):
+        return True
+
+    @property
+    def replayable(self):
+        return True
+
+
+def _yt_playlist_for(yt, folder: str, privacy: str) -> str:
+    """One playlist per archive folder, created once and reused."""
+    table = _table(f"{TABLE_PREFIX}youtube")
+    cached = table.get_item(Key={"slug": f"pl:{folder.lower()}"}).get("Item")
+    if cached:
+        return cached["playlist_id"]
+    token = None
+    while True:
+        resp = yt.playlists().list(mine=True, part="snippet", maxResults=50,
+                                   pageToken=token).execute()
+        for pl in resp.get("items", []):
+            if pl["snippet"]["title"].lower() == folder.lower():
+                table.put_item(Item={"slug": f"pl:{folder.lower()}",
+                                     "playlist_id": pl["id"]})
+                return pl["id"]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    pl = yt.playlists().insert(part="snippet,status", body={
+        "snippet": {"title": folder[:150],
+                    "description": f"3B Archive folder — {folder}."},
+        "status": {"privacyStatus": privacy},
+    }).execute()
+    table.put_item(Item={"slug": f"pl:{folder.lower()}",
+                         "playlist_id": pl["id"]})
+    print(f"YT playlist created: {folder} ({pl['id']})")
+    return pl["id"]
+
+
+def _yt_in_playlist(yt, playlist_id: str, video_id: str) -> bool:
+    token = None
+    while True:
+        resp = yt.playlistItems().list(
+            playlistId=playlist_id, part="contentDetails", maxResults=50,
+            pageToken=token).execute()
+        for it in resp.get("items", []):
+            if it["contentDetails"]["videoId"] == video_id:
+                return True
+        token = resp.get("nextPageToken")
+        if not token:
+            return False
+
+
+def _yt_push_job(event: dict) -> dict:
+    from botocore.config import Config
+
+    slug = str(event.get("slug", ""))
+    privacy = str(event.get("privacy", "private"))
+    queue = event.get("queue") or []
+    if not slug:
+        return {"ok": False, "reason": "no slug"}
+
+    yt = _yt_client()
+    yt_table = _table(f"{TABLE_PREFIX}youtube")
+    if yt_table.get_item(Key={"slug": slug}).get("Item"):
+        print(f"YT skip {slug}: already pushed")
+        return {"ok": True, "slug": slug, "skipped": True}
+
+    item = _table(VIDEOS_TABLE).get_item(Key={"slug": slug}).get("Item")
+    if not item:
+        return {"ok": False, "reason": "not in catalog"}
+    title = str(item.get("title", slug))
+    folder = str(item.get("folder", "Archive"))
+
+    s3 = boto3.client("s3", config=Config(read_timeout=120))
+    pl_text = s3.get_object(Bucket=BUCKET,
+                            Key=f"videos/{slug}/index.m3u8")["Body"].read().decode()
+    keys = [f"videos/{slug}/{l.strip()}" for l in pl_text.splitlines()
+            if l.strip() and not l.startswith("#")]
+    init = None
+    for l in pl_text.splitlines():
+        if l.startswith("#EXT-X-MAP:"):
+            init = f"videos/{slug}/{l.split('URI=')[1].strip(chr(34))}"
+            break
+    ordered = ([init] if init else []) + keys
+    parts, offset = [], 0
+    for k in ordered:
+        h = s3.head_object(Bucket=BUCKET, Key=k)
+        parts.append({"key": k, "size": h["ContentLength"], "offset": offset})
+        offset += h["ContentLength"]
+    total = offset
+
+    media = _yt_push_media(s3, parts, total)
+    body = {
+        "snippet": {"title": title[:100],
+                    "description": f"3B Archive — {folder}.",
+                    "tags": ["3b-archive", folder.lower().replace(" ", "-")],
+                    "categoryId": "20"},
+        "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
+    }
+    request = yt.videos().insert(part="snippet,status", body=body,
+                                 media_body=media)
+    response, last_pct = None, -1
+    while response is None:
+        status, response = request.next_chunk()
+        if status:
+            pct = int(status.progress() * 100)
+            if pct >= last_pct + 10:
+                print(f"YT {slug}: {pct}%")
+                last_pct = pct
+    vid = response["id"]
+    actual_priv = response.get("status", {}).get("privacyStatus", "?")
+    print(f"YT pushed {slug} -> {vid} ({actual_priv})")
+
+    pl_id = _yt_playlist_for(yt, folder, privacy)
+    if not _yt_in_playlist(yt, pl_id, vid):
+        yt.playlistItems().insert(part="snippet", body={
+            "snippet": {"playlistId": pl_id, "resourceId": {
+                "kind": "youtube#video", "videoId": vid}}}).execute()
+    yt_table.put_item(Item={
+        "slug": slug, "youtube_id": vid, "privacy": actual_priv,
+        "pushed_at": int(time.time())})
+
+    # chain: fire the next queued video in its own 15-min window
+    if queue:
+        arn = event.get("context_arn")
+        if arn:
+            boto3.client("lambda").invoke(
+                FunctionName=arn, InvocationType="Event",
+                Payload=json.dumps({"action": "yt_push", "slug": queue[0],
+                                    "privacy": privacy, "queue": queue[1:],
+                                    "context_arn": arn}))
+    return {"ok": True, "slug": slug, "youtube_id": vid}
+
+
+class _yt_push_media:
+    """MediaUpload over the virtual fMP4 concat (init + segments)."""
+
+    def __init__(self, s3, parts, total, chunk=16 * 1024 * 1024):
+        from googleapiclient.http import MediaUpload
+        self._s3, self._parts, self._total, self._chunk = s3, parts, total, chunk
+        self.pos = 0
+
+    def size(self):
+        return self._total
+
+    def chunksize(self):
+        return self._chunk
+
+    def resumable(self):
+        return True
+
+    def mimetype(self):
+        return "video/mp4"
+
+    def getbytes(self, begin: int, length: int) -> bytes:
+        if begin >= self._total:
+            return b""
+        length = min(length, self._total - begin)
+        out = bytearray()
+        while len(out) < length:
+            pos = begin + len(out)
+            part = next(p for p in self._parts
+                        if p["offset"] <= pos < p["offset"] + p["size"])
+            s = pos - part["offset"]
+            take = min(length - len(out), part["size"] - s)
+            body = self._s3.get_object(
+                Bucket=BUCKET, Key=part["key"],
+                Range=f"bytes={s}-{s + take - 1}")["Body"].read()
+            out.extend(body)
+        self.pos = begin + len(out)
+        return bytes(out)
+
+    @property
+    def replayable(self):
+        return True
+
+
+def _yt_push_all_job(event: dict) -> dict:
+    """Chain-push every archived video, one Event invocation per video."""
+    slugs = [i["slug"] for i in _table(VIDEOS_TABLE).scan(
+        ProjectionExpression="slug").get("Items", [])]
+    yt_done = {i["slug"] for i in _table(f"{TABLE_PREFIX}youtube").scan(
+        ProjectionExpression="slug").get("Items", [])}
+    pending = [s for s in sorted(slugs) if s not in yt_done]
+    print(f"YT push-all: {len(pending)} pending")
+    arn = event.get("context_arn")
+    if pending and arn:
+        boto3.client("lambda").invoke(
+            FunctionName=arn, InvocationType="Event",
+            Payload=json.dumps({"action": "yt_push", "slug": pending[0],
+                                "privacy": event.get("privacy", "private"),
+                                "queue": pending[1:]}))
+    return {"ok": True, "remaining": len(pending)}
 
 
 # ------------------------------------------------------------------- helpers
