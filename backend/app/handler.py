@@ -1060,43 +1060,50 @@ class _yt_push_media:
     """MediaUpload over the virtual fMP4 concat (init + segments)."""
 
     def __init__(self, s3, parts, total, chunk=16 * 1024 * 1024):
+        # Must inherit MediaUpload: googleapiclient isinstance()-checks the
+        # media object before accepting it.
         from googleapiclient.http import MediaUpload
-        self._s3, self._parts, self._total, self._chunk = s3, parts, total, chunk
-        self.pos = 0
 
-    def size(self):
-        return self._total
+        class _S3Media(MediaUpload):
+            def __init__(s, s3, parts, total, chunk):
+                s._s3, s._parts, s._total, s._chunk = s3, parts, total, chunk
+                s.pos = 0
 
-    def chunksize(self):
-        return self._chunk
+            def size(s):
+                return s._total
 
-    def resumable(self):
-        return True
+            def chunksize(s):
+                return s._chunk
 
-    def mimetype(self):
-        return "video/mp4"
+            def resumable(s):
+                return True
 
-    def getbytes(self, begin: int, length: int) -> bytes:
-        if begin >= self._total:
-            return b""
-        length = min(length, self._total - begin)
-        out = bytearray()
-        while len(out) < length:
-            pos = begin + len(out)
-            part = next(p for p in self._parts
-                        if p["offset"] <= pos < p["offset"] + p["size"])
-            s = pos - part["offset"]
-            take = min(length - len(out), part["size"] - s)
-            body = self._s3.get_object(
-                Bucket=BUCKET, Key=part["key"],
-                Range=f"bytes={s}-{s + take - 1}")["Body"].read()
-            out.extend(body)
-        self.pos = begin + len(out)
-        return bytes(out)
+            def mimetype(s):
+                return "video/mp4"
 
-    @property
-    def replayable(self):
-        return True
+            def getbytes(s, begin, length):
+                if begin >= s._total:
+                    return b""
+                length = min(length, s._total - begin)
+                out = bytearray()
+                while len(out) < length:
+                    pos = begin + len(out)
+                    part = next(p for p in s._parts
+                                if p["offset"] <= pos < p["offset"] + p["size"])
+                    start_in = pos - part["offset"]
+                    take = min(length - len(out), part["size"] - start_in)
+                    body = s._s3.get_object(
+                        Bucket=BUCKET, Key=part["key"],
+                        Range=f"bytes={start_in}-{start_in + take - 1}"
+                    )["Body"].read()
+                    out.extend(body)
+                s.pos = begin + len(out)
+                return bytes(out)
+
+        self._impl = _S3Media(s3, parts, total, chunk)
+
+    def __getattr__(self, name):
+        return getattr(self._impl, name)
 
 
 def _yt_push_all_job(event: dict) -> dict:
