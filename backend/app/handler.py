@@ -831,7 +831,16 @@ def _yt_token() -> dict:
     token = json.loads(
         ssm.get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"])
 
-    if token.get("expiry") and time.time() < float(token["expiry"]) - 60:
+    # expiry may be an epoch float or an ISO string from the OAuth lib
+    exp = token.get("expiry")
+    if isinstance(exp, str):
+        try:
+            from datetime import datetime
+            exp = datetime.fromisoformat(
+                exp.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            exp = 0
+    if exp and time.time() < float(exp) - 60:
         return token
 
     client = requests.post(
