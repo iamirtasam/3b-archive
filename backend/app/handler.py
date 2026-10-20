@@ -82,6 +82,9 @@ def lambda_handler(event, context):
     if event.get("action") == "yt_push_all":
         event["context_arn"] = context.invoked_function_arn
         return _yt_push_all_job(event)
+    if event.get("action") == "yt_file_all":
+        event["context_arn"] = context.invoked_function_arn
+        return _yt_file_all_job(event)
 
     method = event.get("requestContext", {}).get("http", {}).get("method", "")
     path = event.get("rawPath", "")
@@ -1129,6 +1132,41 @@ class _yt_push_media:
         return getattr(self._impl, name)
 
 
+def _yt_file_video(yt, slug: str, table) -> None:
+    """File an already-pushed video into its folder's playlist, tolerating
+    YouTube's propagation delay on brand-new playlists (up to ~2 min)."""
+    item = table.get_item(Key={"slug": slug}).get("Item")
+    if not item:
+        return
+    vid = item["youtube_id"]
+    cat_item = _table(VIDEOS_TABLE).get_item(Key={"slug": slug}).get("Item")
+    folder = str(cat_item.get("folder", "Archive")) if cat_item else "Archive"
+    privacy = str(item.get("privacy", "private"))
+    if item.get("playlist_id"):
+        return  # already filed
+    pl_id = _yt_playlist_for(yt, folder, privacy)
+    last_err = None
+    for attempt in range(6):
+        try:
+            if _yt_in_playlist(yt, pl_id, vid):
+                item["playlist_id"] = pl_id
+                table.put_item(Item=item)
+                return
+            yt.playlistItems().insert(part="snippet", body={
+                "snippet": {"playlistId": pl_id, "resourceId": {
+                    "kind": "youtube#video", "videoId": vid}}}).execute()
+            item["playlist_id"] = pl_id
+            table.put_item(Item=item)
+            print(f"YT filed {slug} into {folder}")
+            return
+        except Exception as err:  # noqa: BLE001
+            if "playlistNotFound" not in str(err):
+                raise
+            last_err = err
+            time.sleep(20)
+    raise last_err
+
+
 def _yt_push_all_job(event: dict) -> dict:
     """Chain-push every archived video, one Event invocation per video."""
     slugs = [i["slug"] for i in _table(VIDEOS_TABLE).scan(
@@ -1145,6 +1183,23 @@ def _yt_push_all_job(event: dict) -> dict:
                                 "privacy": event.get("privacy", "private"),
                                 "queue": pending[1:]}))
     return {"ok": True, "remaining": len(pending)}
+
+
+def _yt_file_all_job(event: dict) -> dict:
+    """Re-file every pushed-but-unfiled video (repair after a filing miss)."""
+    arn = event.get("context_arn")
+    table = _table(f"{TABLE_PREFIX}youtube")
+    unfiled = [i["slug"] for i in table.scan(
+        ProjectionExpression="slug").get("Items", [])
+        if not i.get("playlist_id") and not i["slug"].startswith("pl:")]
+    print(f"YT file-all: {len(unfiled)} unfiled")
+    if unfiled and arn:
+        yt = _yt_client()
+        _yt_file_video(yt, unfiled[0], table)
+        boto3.client("lambda").invoke(
+            FunctionName=arn, InvocationType="Event",
+            Payload=json.dumps({"action": "yt_file_all", "context_arn": arn}))
+    return {"ok": True, "unfiled": len(unfiled)}
 
 
 # ------------------------------------------------------------------- helpers
