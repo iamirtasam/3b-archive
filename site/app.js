@@ -459,11 +459,12 @@
     }
   }
 
-  // Whole-file queue: a few files upload at a time so each makes visible
-  // progress (parts completing) instead of 20 files starving one uplink.
+  // Whole-file queue: exactly ONE file uploads at a time. Your uplink is
+  // the bottleneck, so one file at full speed finishes visibly fast while
+  // the rest wait in line. The active card is pinned to the top of the UI.
   const uploadQueue = [];
   let activeUploads = 0;
-  const MAX_ACTIVE_FILES = 4;
+  const MAX_ACTIVE_FILES = 1;
 
   function queueUpload(file, folder) {
     uploadCard(file, folder);
@@ -482,7 +483,16 @@
     }
   }
 
+  // Pin the currently-uploading card to the top of the queue UI.
+  function pinActive(file) {
+    const card = document.getElementById(
+      `up-${CSS.escape(file.name)}-${file.size}`);
+    if (card) $("upload-queue").prepend(card);
+  }
+
   async function uploadFile(file, opts = {}, isRetry = false) {
+    pinActive(file);
+    const startedAt = Date.now();
     uploadCard(file, opts.folder);
     const startedAt = Date.now();
 
@@ -502,6 +512,7 @@
         setProgress(file, 0, "CONNECTION FAILED — RETRY LATER", "");
         return;
       }
+      pinActive(file);
       meta = { uploadId: r.data.upload_id, key: r.data.key,
                partSize: r.data.part_size, partCount: r.data.part_count };
       saveMeta(file, meta);
@@ -579,6 +590,7 @@
         }).catch(() => {});
         clearMeta(file);
         presignCache.clear();
+        pinActive(file);
         return uploadFile(file, opts, true);
       }
       setProgress(file, (uploadedBytes / file.size) * 100,
@@ -729,7 +741,7 @@
   $("pick-btn").addEventListener("click", () => $("file-input").click());
   $("pick-folder-btn").addEventListener("click", () => $("folder-input").click());
   $("file-input").addEventListener("change", (e) => {
-    for (const file of e.target.files) uploadFile(file, { folder: "" });
+    for (const file of e.target.files) queueUpload(file, "");
     e.target.value = ""; // allow re-picking the same file
   });
   $("folder-input").addEventListener("change", (e) => {
@@ -867,7 +879,7 @@
         setProgress(file, 0, reason, "");
         continue;
       }
-      uploadFile(file, { folder: "" });
+      queueUpload(file, "");
     }
   });
 
