@@ -641,7 +641,7 @@
       const r = await api("/api/videos").catch(() => ({ status: 0 }));
       if (r.status === 200 &&
           (r.data.videos || []).some((v) => v.slug === slug)) {
-        setProgress(file, 100, "LIVE âœ“ — ON THE ARCHIVE",
+        setProgress(file, 100, "LIVE ✓ — ON THE ARCHIVE",
           "CLICK HOME TO WATCH");
         if (typeof enterApp === "function") enterApp(r.data);
         return;
