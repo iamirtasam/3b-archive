@@ -298,7 +298,7 @@
     $("player-folder").textContent = `THE ARCHIVE — ${v.folder.toUpperCase()}`;
     $("player-duration").textContent = fmtMin(v.duration_seconds);
     $("player-resolution").textContent =
-      v.width && v.height ? `${v.width} Ã— ${v.height}` : "HLS";
+      v.width && v.height ? `${v.width} × ${v.height}` : "HLS";
 
     attachSource(video, v.playlist);
 
